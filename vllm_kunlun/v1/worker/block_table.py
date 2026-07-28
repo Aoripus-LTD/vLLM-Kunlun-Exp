@@ -17,7 +17,7 @@ and re-import via the ``_kunlun_slot_patched`` flag on the class.
 
 import logging
 
-import kunlun_ops
+import numpy as np
 import torch
 from vllm.v1.worker.block_table import PAD_SLOT_ID
 from vllm.v1.worker.block_table import BlockTable as _upstream_cls
@@ -26,25 +26,59 @@ logger = logging.getLogger("vllm_kunlun")
 
 
 def _compute_slot_mapping(self, num_reqs, query_start_loc, positions):
+    # kunlun_ops 0.1.58 (the wheel pinned in the install docs) has no
+    # compute_slot_mappings; compute on CPU via the NumPy mirrors instead
+    # (block_table.np / slot_mapping.np), then one H2D copy. Correctness
+    # first; the H2D/D2H round trip is acceptable for now.
     num_tokens = positions.shape[0]
-    total_cp_world_size = self.pcp_world_size * self.dcp_world_size
+    max_num_tokens = self.max_num_batched_tokens
+    block_size = self.block_size
+    block_table_np = self.block_table.np
+    slot_mapping_np = self.slot_mapping.np
+    total_cp = self.pcp_world_size * self.dcp_world_size
+
+    if total_cp == 1:
+        if num_tokens > 0:
+            pos_np = positions[:num_tokens].cpu().numpy()
+            qsl_np = query_start_loc[: num_reqs + 1].cpu().numpy()
+            token_arange = np.arange(num_tokens, dtype=qsl_np.dtype)
+            req_idx = np.searchsorted(qsl_np, token_arange, side="right") - 1
+            np.clip(req_idx, 0, num_reqs - 1, out=req_idx)
+            block_idx = pos_np // block_size
+            offset = pos_np - block_idx * block_size
+            block_num = block_table_np[req_idx, block_idx].astype(np.int64)
+            np.add(
+                block_num * block_size,
+                offset,
+                out=slot_mapping_np[:num_tokens],
+            )
+        if max_num_tokens > num_tokens:
+            slot_mapping_np[num_tokens:max_num_tokens] = PAD_SLOT_ID
+        self.slot_mapping.copy_to_gpu()
+        return
+
     total_cp_rank = self.pcp_rank * self.dcp_world_size + self.dcp_rank
-    block_sizes = torch.tensor(
-        [self.block_size], dtype=torch.int32, device=self.block_table.gpu.device
-    )
-    kunlun_ops.compute_slot_mappings(
-        [self.slot_mapping.gpu],  # list
-        [self.block_table.gpu],  # list
-        positions,
-        query_start_loc,
-        block_sizes,  # int32 tensor
-        num_reqs,
-        num_tokens,
-        PAD_SLOT_ID,
-        total_cp_world_size,
-        total_cp_rank,
-        self.cp_kv_cache_interleave_size,
-    )
+    cp_int = self.cp_kv_cache_interleave_size
+    virtual_block_size = block_size * total_cp
+    qsl_np = query_start_loc[: num_reqs + 1].cpu().numpy()
+    pos_np = positions[:num_tokens].cpu().numpy() if num_tokens > 0 else None
+    for r in range(num_reqs):
+        s, e = int(qsl_np[r]), int(qsl_np[r + 1])
+        if e <= s:
+            continue
+        pos = pos_np[s:e]
+        block_indices = pos // virtual_block_size
+        block_numbers = block_table_np[r, block_indices].astype(np.int64)
+        virtual_off = pos - block_indices * virtual_block_size
+        is_local = (virtual_off // cp_int) % total_cp == total_cp_rank
+        local_off = (virtual_off // (total_cp * cp_int)) * cp_int + (
+            virtual_off % cp_int
+        )
+        slot = block_numbers * block_size + local_off
+        slot_mapping_np[s:e] = np.where(is_local, slot, PAD_SLOT_ID)
+    if max_num_tokens > num_tokens:
+        slot_mapping_np[num_tokens:max_num_tokens] = PAD_SLOT_ID
+    self.slot_mapping.copy_to_gpu()
 
 
 # def _compute_slot_mapping(self, num_reqs, query_start_loc, positions):
