@@ -806,4 +806,23 @@ class DeepseekV4Indexer(nn.Module):
             self.ln_events[1],
             self.aux_stream,
         )
-        return self.indexer_op(hidden_states, q_quant, k, weights)
+        # Kunlun: SparseAttnIndexer.forward_native only implements
+        # CUDA/ROCm/XPU. Use the torch-native indexer instead.
+        from vllm_kunlun.models.deepseek_v4.kunlun_indexer import (
+            sparse_indexer_torch,
+        )
+
+        forward_context = get_forward_context()
+        meta = forward_context.attn_metadata if forward_context is not None else None
+        block_size_c = self.k_cache.cache_config.block_size // self.compress_ratio
+        return sparse_indexer_torch(
+            self.k_cache,
+            q_quant,
+            weights,
+            positions,
+            meta,
+            self.topk_indices_buffer,
+            self.topk_tokens,
+            self.compress_ratio,
+            block_size_c,
+        )
