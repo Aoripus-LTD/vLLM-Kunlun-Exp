@@ -101,36 +101,67 @@ def _shim_torch_251_missing_modules() -> None:
       module top level. The abstract contract is a callable taking an
       ``fx.Graph``; compilation passes never actually run on Kunlun
       (enforce-eager), so a faithful-shape stub is sufficient.
+    - ``torch.fx._graph_pickler`` (torch 2.6+): vllm's ``compilation/caching.py``
+      imports ``GraphPickler``/``Options`` at module top level to serialize
+      compile caches. Unused under enforce-eager; stub shapes only.
     """
     try:
         import torch._inductor  # noqa: F401
 
-        if "torch._inductor.custom_graph_pass" in sys.modules:
-            return
-        try:
-            import torch._inductor.custom_graph_pass  # noqa: F401
-
-            return
-        except ImportError:
-            pass
-
         import types as _types
 
-        mod = _types.ModuleType("torch._inductor.custom_graph_pass")
+        # torch._inductor.custom_graph_pass stub (torch 2.6+)
+        try:
+            import torch._inductor.custom_graph_pass  # noqa: F401
+        except ImportError:
+            mod = _types.ModuleType("torch._inductor.custom_graph_pass")
 
-        class CustomGraphPass:
-            """Stub matching torch 2.6+'s CustomGraphPass interface."""
+            class CustomGraphPass:
+                """Stub matching torch 2.6+'s CustomGraphPass interface."""
 
-            def __call__(self, graph) -> None:
-                raise NotImplementedError(
-                    "CustomGraphPass is not available on torch 2.5.1 (Kunlun)"
-                )
+                def __call__(self, graph) -> None:
+                    raise NotImplementedError(
+                        "CustomGraphPass is not available on torch 2.5.1 (Kunlun)"
+                    )
 
-        mod.CustomGraphPass = CustomGraphPass
-        sys.modules["torch._inductor.custom_graph_pass"] = mod
-        import torch._inductor as _inductor
+            mod.CustomGraphPass = CustomGraphPass
+            sys.modules["torch._inductor.custom_graph_pass"] = mod
+            import torch._inductor as _inductor
 
-        _inductor.custom_graph_pass = mod
+            _inductor.custom_graph_pass = mod
+
+        # torch.fx._graph_pickler stub (torch 2.6+), imported by vllm's
+        # compilation/caching.py; unused under enforce-eager.
+        try:
+            import torch.fx._graph_pickler  # noqa: F401
+        except ImportError:
+            import torch.fx as _fx
+
+            gp = _types.ModuleType("torch.fx._graph_pickler")
+
+            class GraphPickler:
+                """Stub matching torch 2.6+'s GraphPickler interface."""
+
+                @staticmethod
+                def dumps(obj, options=None):
+                    raise NotImplementedError(
+                        "GraphPickler is not available on torch 2.5.1 (Kunlun)"
+                    )
+
+                @staticmethod
+                def loads(data, fake_mode=None):
+                    raise NotImplementedError(
+                        "GraphPickler is not available on torch 2.5.1 (Kunlun)"
+                    )
+
+            class Options:
+                def __init__(self, ops_filter=None):
+                    self.ops_filter = ops_filter
+
+            gp.GraphPickler = GraphPickler
+            gp.Options = Options
+            sys.modules["torch.fx._graph_pickler"] = gp
+            _fx._graph_pickler = gp
     except Exception:
         # Best-effort compatibility shim; never block plugin import.
         pass
@@ -212,6 +243,122 @@ def _shim_torch_251_library_attrs() -> None:
 
 
 _shim_torch_251_library_attrs()
+
+
+def _shim_torch_251_accelerator() -> None:
+    """Provide a torch.accelerator (torch 2.6+) facade backed by torch.cuda.
+
+    torch 2.5.1 has no ``torch.accelerator`` module, but vllm 0.25.1 uses its
+    device API throughout (synchronize / empty_cache / current_device_index /
+    device_count / device_index context manager / memory queries). All of these
+    have direct torch.cuda equivalents on the Kunlun cuda_mock stack.
+    """
+    try:
+        import torch as _torch
+
+        if hasattr(_torch, "accelerator"):
+            return
+
+        class _DeviceIndexCtx:
+            """Context manager form of torch.accelerator.device_index(idx)."""
+
+            def __init__(self, index):
+                self._index = index
+                self._prev = None
+
+            def __enter__(self):
+                self._prev = _torch.cuda.current_device()
+                _torch.cuda.set_device(self._index)
+                return self
+
+            def __exit__(self, *exc):
+                _torch.cuda.set_device(self._prev)
+                return False
+
+        class _AcceleratorShim:
+            @staticmethod
+            def synchronize(device=None):
+                _torch.cuda.synchronize(device)
+
+            @staticmethod
+            def empty_cache():
+                _torch.cuda.empty_cache()
+
+            @staticmethod
+            def current_device_index():
+                return _torch.cuda.current_device()
+
+            @staticmethod
+            def set_device_index(index):
+                _torch.cuda.set_device(index)
+
+            @staticmethod
+            def device_count():
+                return _torch.cuda.device_count()
+
+            @staticmethod
+            def is_available():
+                return _torch.cuda.is_available()
+
+            @staticmethod
+            def memory_reserved(device=None):
+                return _torch.cuda.memory_reserved(device)
+
+            @staticmethod
+            def memory_stats(device=None):
+                return _torch.cuda.memory_stats(device)
+
+            @staticmethod
+            def reset_peak_memory_stats(device=None):
+                _torch.cuda.reset_peak_memory_stats(device)
+
+            @staticmethod
+            def set_stream(stream, device=None):
+                return _torch.cuda.set_stream(stream, device)
+
+            @staticmethod
+            def device_index(index):
+                return _DeviceIndexCtx(index)
+
+        _torch.accelerator = _AcceleratorShim()
+    except Exception:
+        # Best-effort compatibility shim; never block plugin import.
+        pass
+
+
+_shim_torch_251_accelerator()
+
+
+def _block_pyarrow_import() -> None:
+    """Block ``import pyarrow`` — its native init segfaults in this environment.
+
+    Observed: when the serve chain (vllm + torchvision + pandas loaded) reaches
+    the dlopen of ``pyarrow.lib``, a pyarrow background thread dies with
+    SIGSEGV (see core dump: ``background_thread_entry`` in libarrow.so.2300).
+    pyarrow is optional for both pandas and torchvision.datasets, and the vllm
+    serve path does not need it, so we raise ImportError on purpose; pandas
+    catches it and falls back to the non-pyarrow code path.
+    """
+    try:
+
+        class _BlockPyarrow:
+            def find_module(self, name, path=None):
+                if name == "pyarrow" or name.startswith("pyarrow."):
+                    return self
+                return None
+
+            def load_module(self, name):
+                raise ImportError(
+                    "pyarrow is blocked on Kunlun (native SIGSEGV workaround)"
+                )
+
+        sys.meta_path.insert(0, _BlockPyarrow())
+    except Exception:
+        # Best-effort workaround; never block plugin import.
+        pass
+
+
+_block_pyarrow_import()
 
 
 _MODULE_MAPPINGS = {
@@ -550,14 +697,9 @@ def register():
     try:
         import torch as _torch
 
-        # torch 2.5.1 (xpytorch cp310-torch251) has no torch.accelerator module
-        # (introduced in torch 2.6+). Create a shim namespace so the patch below
-        # and any later torch.accelerator attribute access do not AttributeError.
-        if not hasattr(_torch, "accelerator"):
-            import types as _types
-
-            _torch.accelerator = _types.SimpleNamespace()
-
+        # torch.accelerator is guaranteed to exist here: on torch 2.5.1 the
+        # module-level shim (_shim_torch_251_accelerator) installs a
+        # torch.cuda-backed facade; on newer torch the real module exists.
         def _kunlun_get_memory_info(device=None):
             if device is None:
                 idx = _torch.cuda.current_device()
