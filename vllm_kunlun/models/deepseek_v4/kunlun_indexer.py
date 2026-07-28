@@ -128,7 +128,11 @@ def sparse_indexer_torch(
     kv = k_cache_module.kv_cache
     if kv.numel() == 0:
         return out
-    kv2d = kv.view(-1, head_dim + 4)
+    # The indexer cache is allocated with 576B alignment per slot while the
+    # meaningful payload is head_dim+4 (128 fp8 + 4B scale). Read full rows
+    # and slice the payload.
+    row_w = kv.shape[-1] if kv.dim() > 1 else head_dim + 4
+    kv_full = kv.reshape(-1, row_w)
 
     lut = _e4m3_lut(q_quant.device)
     for t in range(num_tokens):
@@ -152,9 +156,9 @@ def sparse_indexer_torch(
             page_ids[page_slot] * block_size_compressed
             + offs % block_size_compressed
         ).long()
-        valid_slot = (slots >= 0) & (slots < kv2d.shape[0])
-        slots = slots.clamp(0, kv2d.shape[0] - 1)
-        rows = kv2d[slots]
+        valid_slot = (slots >= 0) & (slots < kv_full.shape[0])
+        slots = slots.clamp(0, kv_full.shape[0] - 1)
+        rows = kv_full[slots][:, : head_dim + 4]
         k_fp32 = lut[rows[:, :head_dim].long()] * rows[:, head_dim : head_dim + 4].view(
             torch.float32
         )
