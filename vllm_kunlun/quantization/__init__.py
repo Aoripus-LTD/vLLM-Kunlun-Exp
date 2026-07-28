@@ -152,6 +152,8 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
     from vllm.model_executor.layers.quantization.quark.quark import QuarkConfig
     from vllm.model_executor.layers.quantization.torchao import TorchAOConfig
 
+    from vllm_kunlun.models.deepseek_v4.quant_config import DeepseekV4FP8Config
+
     method_to_config: dict[str, type[QuantizationConfig]] = {
         "awq": AWQConfig,
         "fp8": Fp8Config,
@@ -179,6 +181,7 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
         "mxfp4": Mxfp4Config,
         "petit_nvfp4": PetitNvFp4Config,
         "cpu_awq": CPUAWQConfig,
+        "deepseek_v4_fp8": DeepseekV4FP8Config,
     }
     # Update the `method_to_config` with customized quantization methods.
     method_to_config.update(_CUSTOMIZED_METHOD_TO_QUANT_CONFIG)
