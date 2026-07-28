@@ -226,4 +226,6 @@ def compress_norm_rope_store_128_torch(
         base = pos_in * HEAD128
         kv2d[kv_block, base : base + HEAD128] = q_bytes
         soff = kv_block_size * HEAD128 + pos_in * 4
-        kv2d[kv_block, soff : soff + 4] = scale_val.view(torch.float32).view(torch.uint8)
+        kv2d[kv_block, soff : soff + 4] = (
+            scale_val.reshape(1).view(torch.float32).view(torch.uint8)
+        )
