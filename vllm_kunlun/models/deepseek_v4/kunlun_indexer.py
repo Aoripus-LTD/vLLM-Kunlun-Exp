@@ -118,14 +118,22 @@ def sparse_indexer_torch(
         if n_valid <= 0:
             continue
         pages = block_table[r]  # [max_pages]
-        n_pages_used = (n_valid + block_size_compressed - 1) // block_size_compressed
-        page_ids = pages[:n_pages_used]
-        # global slot ids for compressed entries 0..n_valid-1
+        n_pages_used = min(
+            (n_valid + block_size_compressed - 1) // block_size_compressed,
+            pages.shape[0],
+        )
+        page_ids = pages[:n_pages_used].long()
+        # global slot ids for compressed entries 0..n_valid-1; clamp the page
+        # table read and the final slots into the allocated cache range
+        # (sentinel/garbage entries become invalid and are masked below).
         offs = torch.arange(n_valid, device=q_quant.device)
+        page_slot = (offs // block_size_compressed).clamp(0, page_ids.shape[0] - 1)
         slots = (
-            page_ids[offs // block_size_compressed] * block_size_compressed
+            page_ids[page_slot] * block_size_compressed
             + offs % block_size_compressed
         ).long()
+        valid_slot = (slots >= 0) & (slots < kv2d.shape[0])
+        slots = slots.clamp(0, kv2d.shape[0] - 1)
         rows = kv2d[slots]
         k_fp32 = lut[rows[:, :head_dim].long()] * rows[:, head_dim : head_dim + 4].view(
             torch.float32
@@ -133,10 +141,15 @@ def sparse_indexer_torch(
         # logits[t, j] = sum_h weights[t,h] * dot(q[t,h,:], K[j,:])
         logits_h = torch.einsum("hd,jd->hj", q_quant[t].float(), k_fp32)  # [H, J]
         logits = torch.einsum("hj,h->j", logits_h, weights[t].float())  # [J]
+        logits = logits.masked_fill(~valid_slot, float("-inf"))
         k_take = min(topk_tokens, n_valid)
         if k_take == n_valid:
             take = torch.arange(n_valid, device=q_quant.device)
         else:
             take = torch.topk(logits, k_take).indices.sort().values
-        out[t, :k_take] = slots[take].to(out.dtype)
+        out[t, :k_take] = torch.where(
+            valid_slot[take],
+            slots[take].to(out.dtype),
+            torch.full_like(slots[take], -1, dtype=out.dtype),
+        )
     return out
