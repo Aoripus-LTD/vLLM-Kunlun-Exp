@@ -370,6 +370,14 @@ def register():
     try:
         import torch as _torch
 
+        # torch 2.5.1 (xpytorch cp310-torch251) has no torch.accelerator module
+        # (introduced in torch 2.6+). Create a shim namespace so the patch below
+        # and any later torch.accelerator attribute access do not AttributeError.
+        if not hasattr(_torch, "accelerator"):
+            import types as _types
+
+            _torch.accelerator = _types.SimpleNamespace()
+
         def _kunlun_get_memory_info(device=None):
             if device is None:
                 idx = _torch.cuda.current_device()
