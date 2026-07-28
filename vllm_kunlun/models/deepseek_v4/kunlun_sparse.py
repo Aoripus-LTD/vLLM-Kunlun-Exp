@@ -337,12 +337,18 @@ class DeepseekV4KunlunAttention(DeepseekV4Attention):
             )
 
             kv_ws = kv[:chunk_size].reshape(-1, 1, q.shape[-1])
-            out, _, _ = triton_bf16_mla_sparse_interface(
-                q=q[query_start:query_end],
-                kv=kv_ws,
-                indices=combined_indices.unsqueeze(1),
-                sm_scale=self.scale,
-                d_v=q.shape[-1],
-                block_dpe=0,
-            )
-            output[query_start:query_end] = out
+            # Kunlun: triton_bf16_mla_sparse_interface cannot run here; do the
+            # sparse attention in torch: per token, softmax over its combined
+            # index set (lens + >=0 mask) of q·K*scale, weighted sum of K.
+            for t in range(query_start, query_end):
+                rel = t - query_start
+                idx = combined_indices[rel]
+                n_valid = int(combined_lens[rel].item())
+                idx = idx[:n_valid]
+                idx = idx[idx >= 0]
+                if idx.numel() == 0:
+                    continue
+                k = kv_ws[idx.long(), 0].float()  # [n, D]
+                s = (q[t].float() @ k.T) * self.scale  # [H, n]
+                p = torch.softmax(s, dim=-1)
+                output[t] = (p @ k).to(output.dtype)
