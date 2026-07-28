@@ -187,24 +187,39 @@ def xpu_sparse_decode_fp8(
     ws_3d = workspace.view(num_tokens, K_total, OUTPUT_DIM)
 
     # Dequant+gather topk slots from compressed cache
+    from vllm_kunlun.models.deepseek_v4.common.ops.cache_utils import (
+        gather_ds_mla_slots_torch,
+    )
+
     if not swa_only and topk_idx_2d is not None and kv_cache is not None:
-        topk_flat = topk_idx_2d.reshape(-1).to(torch.int32)
-        topk_buf = torch.empty(
-            (num_tokens * max_topk, OUTPUT_DIM), dtype=torch.bfloat16, device=device
+        topk_flat = topk_idx_2d.reshape(-1).long()
+        valid = topk_flat >= 0
+        topk_buf = torch.zeros(
+            (num_tokens * max_topk, OUTPUT_DIM), dtype=torch.float32, device=device
         )
-        compressed_block_size = kv_cache.shape[1]
-        dequant_gather_slots(topk_buf, kv_cache, topk_flat, compressed_block_size)
-        ws_3d[:, :max_topk, :] = topk_buf.view(num_tokens, max_topk, OUTPUT_DIM)
+        if bool(valid.any()):
+            compressed_block_size = kv_cache.shape[1]
+            topk_buf[valid] = gather_ds_mla_slots_torch(
+                kv_cache, compressed_block_size, topk_flat[valid]
+            )
+        ws_3d[:, :max_topk, :] = topk_buf.view(num_tokens, max_topk, OUTPUT_DIM).to(
+            torch.bfloat16
+        )
 
     # Dequant+gather SWA slots
-    swa_flat = swa_idx_2d.reshape(-1).to(torch.int32)
-    swa_buf = torch.empty(
-        (num_tokens * max_swa, OUTPUT_DIM), dtype=torch.bfloat16, device=device
+    swa_flat = swa_idx_2d.reshape(-1).long()
+    valid_s = swa_flat >= 0
+    swa_buf = torch.zeros(
+        (num_tokens * max_swa, OUTPUT_DIM), dtype=torch.float32, device=device
     )
-    swa_block_size = swa_kv_cache.shape[1]
-    dequant_gather_slots(swa_buf, swa_kv_cache, swa_flat, swa_block_size)
-
-    ws_3d[:, max_topk:, :] = swa_buf.view(num_tokens, max_swa, OUTPUT_DIM)
+    if bool(valid_s.any()):
+        swa_block_size = swa_kv_cache.shape[1]
+        swa_buf[valid_s] = gather_ds_mla_slots_torch(
+            swa_kv_cache, swa_block_size, swa_flat[valid_s]
+        )
+    ws_3d[:, max_topk:, :] = swa_buf.view(num_tokens, max_swa, OUTPUT_DIM).to(
+        torch.bfloat16
+    )
 
     # Build combined indices into the flat workspace and combined lengths.
     # Workspace layout per token t: [topk_0..topk_{max_topk-1}, swa_0..swa_{max_swa-1}]
@@ -277,13 +292,16 @@ def xpu_sparse_decode_fp8(
             torch.tensor(-1, dtype=torch.int32, device=device),
         )
 
-    # Call BF16 sparse MLA kernel
-    out_attn, _, _ = triton_bf16_mla_sparse_interface(
-        q=q,
-        kv=workspace.unsqueeze(1),
-        indices=combined_indices.unsqueeze(1),
-        sm_scale=softmax_scale,
-        d_v=q.shape[-1],
-        block_dpe=0,
-    )
-    out.copy_(out_attn)
+    # Kunlun: triton_bf16_mla_sparse_interface cannot run here; per-token
+    # torch sparse attention with attn_sink appended to the softmax.
+    sink = attn_sink.float()
+    for t in range(num_tokens):
+        idx = combined_indices[t]
+        idx = idx[idx >= 0]
+        if idx.numel() == 0:
+            continue
+        k = workspace[idx.long()].float()  # [n, 512] gathered bf16 rows
+        s = (q[t].float() @ k.T) * softmax_scale  # [H, n]
+        s = torch.cat([s, sink.unsqueeze(1)], dim=-1)  # [H, n+1]
+        p = torch.softmax(s, dim=-1)
+        out[t] = (p[:, : idx.numel()] @ k).to(out.dtype)
