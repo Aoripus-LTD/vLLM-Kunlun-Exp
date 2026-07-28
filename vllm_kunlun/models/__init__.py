@@ -112,6 +112,18 @@ def register_model():
         "vllm_kunlun.models.gemma4_mm:Gemma4ForConditionalGeneration",
     )
 
+    # DeepSeek V4 (Flash): Kunlun fork of the upstream XPU branch. Overrides the
+    # upstream registration so the NVIDIA dispatch path is never taken on Kunlun.
+    ModelRegistry.register_model(
+        "DeepseekV4ForCausalLM",
+        "vllm_kunlun.models.deepseek_v4.model:DeepseekV4ForCausalLM",
+    )
+
+    ModelRegistry.register_model(
+        "DeepSeekV4MTPModel",
+        "vllm_kunlun.models.deepseek_v4.mtp:DeepSeekV4MTP",
+    )
+
 
 def register_quant_method():
     """to do"""
