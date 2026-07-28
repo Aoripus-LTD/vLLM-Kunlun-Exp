@@ -109,6 +109,7 @@ def _shim_torch_251_missing_modules() -> None:
             return
         try:
             import torch._inductor.custom_graph_pass  # noqa: F401
+
             return
         except ImportError:
             pass
@@ -187,6 +188,30 @@ def _shim_torch_251_missing_dtypes() -> None:
 
 
 _shim_torch_251_missing_dtypes()
+
+
+def _shim_torch_251_library_attrs() -> None:
+    """Backfill torch.library attrs that vllm 0.25.1 imports but torch 2.5.1 lacks.
+
+    - ``torch.library.wrap_triton`` (torch 2.6+): decorator used by vllm's
+      qutlass_utils to wrap Triton kernels into custom ops. Kunlun cannot run
+      Triton anyway; a passthrough stub keeps the import working.
+    """
+    try:
+        import torch as _torch
+
+        if not hasattr(_torch.library, "wrap_triton"):
+
+            def _wrap_triton_passthrough(fn):
+                return fn
+
+            _torch.library.wrap_triton = _wrap_triton_passthrough
+    except Exception:
+        # Best-effort compatibility shim; never block plugin import.
+        pass
+
+
+_shim_torch_251_library_attrs()
 
 
 _MODULE_MAPPINGS = {
