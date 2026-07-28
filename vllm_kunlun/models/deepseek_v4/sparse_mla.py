@@ -6,7 +6,6 @@ from dataclasses import dataclass
 from typing import Any, ClassVar
 
 import torch
-
 from vllm.config import VllmConfig
 from vllm.config.cache import CacheDType
 from vllm.platforms.interface import DeviceCapability
@@ -249,7 +248,7 @@ class DeepseekV4FlashMLAMetadataBuilder(
         # `c128a_global_decode_topk_indices.shape[0]` lines up with q in
         # `_forward_decode`. The per-token C128A kernel handles non-uniform
         # query lengths.
-        (num_decodes, _, num_decode_tokens, num_prefill_tokens) = (
+        num_decodes, _, num_decode_tokens, num_prefill_tokens = (
             split_decodes_and_prefills(
                 cm,
                 decode_threshold=self.reorder_batch_threshold or 1,
@@ -260,9 +259,9 @@ class DeepseekV4FlashMLAMetadataBuilder(
         if num_total == 0:
             return {}
 
-        assert cm.positions is not None, (
-            "positions is required for C128A metadata build"
-        )
+        assert (
+            cm.positions is not None
+        ), "positions is required for C128A metadata build"
         block_size = self.kv_cache_spec.block_size // self.compress_ratio
         global_decode, decode_lens, prefill_local = build_c128a_topk_metadata(
             cm.positions[:num_total],

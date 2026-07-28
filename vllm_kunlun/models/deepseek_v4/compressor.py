@@ -6,19 +6,11 @@ from typing import Any, ClassVar, cast
 
 import torch
 from torch import nn
-
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import MergedColumnParallelLinear
-from vllm_kunlun.models.deepseek_v4.common.ops.fused_compress_quant_cache import (
-    compress_norm_rope_store_triton,
-)
-from vllm_kunlun.models.deepseek_v4.common.ops.fused_indexer_q import MXFP4_BLOCK_SIZE
-from vllm_kunlun.models.deepseek_v4.common.ops.save_partial_states import (
-    save_partial_states,
-)
 from vllm.platforms import current_platform
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -31,6 +23,14 @@ from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     MLAAttentionSpec,
     SlidingWindowMLASpec,
+)
+
+from vllm_kunlun.models.deepseek_v4.common.ops.fused_compress_quant_cache import (
+    compress_norm_rope_store_triton,
+)
+from vllm_kunlun.models.deepseek_v4.common.ops.fused_indexer_q import MXFP4_BLOCK_SIZE
+from vllm_kunlun.models.deepseek_v4.common.ops.save_partial_states import (
+    save_partial_states,
 )
 
 
@@ -248,9 +248,9 @@ class DeepseekCompressor(nn.Module):
         )
 
         if self.head_dim == 512:
-            assert not use_fp4_cache, (
-                "MXFP4 cache is only supported for indexer (head=128)"
-            )
+            assert (
+                not use_fp4_cache
+            ), "MXFP4 cache is only supported for indexer (head=128)"
             self._quant_block = 64
             self._token_stride = self.nope_head_dim + self.rope_head_dim * 2
             self._scale_dim = self.nope_head_dim // 64 + 1  # 7 real + 1 pad

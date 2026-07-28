@@ -11,9 +11,8 @@ from typing import TYPE_CHECKING, Any, ClassVar, cast
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from transformers import DeepseekV2Config, DeepseekV3Config
-
 import vllm.envs as envs
+from transformers import DeepseekV2Config, DeepseekV3Config
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -22,6 +21,7 @@ from vllm.model_executor.layers.linear import (
     RowParallelLinear,
 )
 from vllm.model_executor.layers.sparse_attn_indexer import SparseAttnIndexer
+
 from vllm_kunlun.models.deepseek_v4.common.ops import (
     fused_indexer_q_rope_quant,
     fused_q_kv_rmsnorm,
@@ -44,8 +44,6 @@ from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.models.utils import extract_layer_index
-from vllm_kunlun.models.deepseek_v4.common.rope import build_deepseek_v4_rope
-from vllm_kunlun.models.deepseek_v4.compressor import DeepseekCompressor
 from vllm.utils.multi_stream_utils import (
     execute_in_parallel,
     maybe_execute_in_parallel,
@@ -61,6 +59,9 @@ from vllm.v1.kv_cache_interface import (
     MLAAttentionSpec,
     get_kv_quant_mode,
 )
+
+from vllm_kunlun.models.deepseek_v4.common.rope import build_deepseek_v4_rope
+from vllm_kunlun.models.deepseek_v4.compressor import DeepseekCompressor
 
 logger = init_logger(__name__)
 

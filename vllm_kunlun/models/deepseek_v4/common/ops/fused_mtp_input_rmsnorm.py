@@ -18,7 +18,6 @@ inputs_embeds[token, :], task k+1 is hnorm on previous_hidden_states[token, k, :
 """
 
 import torch
-
 from vllm.triton_utils import tl, triton
 
 
@@ -168,9 +167,9 @@ def fused_mtp_input_rmsnorm(
     assert inputs_embeds.ndim == 2
     assert previous_hidden_states.ndim == 3
     assert previous_hidden_states.shape[1] == hc_mult
-    assert inputs_embeds.shape[0] == previous_hidden_states.shape[0], (
-        "token dim mismatch"
-    )
+    assert (
+        inputs_embeds.shape[0] == previous_hidden_states.shape[0]
+    ), "token dim mismatch"
     assert (
         inputs_embeds.shape[1]
         == previous_hidden_states.shape[2]

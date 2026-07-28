@@ -17,7 +17,6 @@ from collections.abc import Callable, Iterable
 import regex as re
 import torch
 import torch.nn as nn
-
 from vllm.config import VllmConfig
 from vllm.distributed import (
     get_tensor_model_parallel_rank,
@@ -36,12 +35,13 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.deepseek_mtp import SharedHead
 from vllm.model_executor.models.deepseek_v2 import get_spec_layer_idx_from_weight_name
 from vllm.model_executor.models.utils import maybe_prefix
+from vllm.platforms import current_platform
+from vllm.sequence import IntermediateTensors
+
 from vllm_kunlun.models.deepseek_v4.common.ops import (
     fused_mtp_input_rmsnorm,
     mtp_shared_head_rmsnorm,
 )
-from vllm.platforms import current_platform
-from vllm.sequence import IntermediateTensors
 
 from .model import (
     DeepseekV4DecoderLayer,
