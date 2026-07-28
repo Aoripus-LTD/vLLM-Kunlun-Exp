@@ -329,6 +329,68 @@ def _shim_torch_251_accelerator() -> None:
 _shim_torch_251_accelerator()
 
 
+def _shim_triton_jit_kwargs() -> None:
+    """Make ``triton.jit`` tolerate kwargs added after triton 3.1.
+
+    Several upstream vllm modules (e.g. ``vllm.models.minimax_m3``) decorate
+    kernels with ``@triton.jit(do_not_specialize_on_alignment=...)`` — a
+    triton 3.2+ keyword that triton 3.1 rejects at import time. Wrap jit so
+    unknown keywords are dropped. Execution of the kernels is impossible on
+    Kunlun anyway; this only unblocks imports.
+    """
+    try:
+        import inspect as _inspect
+
+        import triton as _triton
+
+        _orig_jit = _triton.jit
+        try:
+            _valid = set(_inspect.signature(_orig_jit).parameters)
+        except (TypeError, ValueError):
+            _valid = None
+
+        def _jit_shim(fn=None, **kwargs):
+            if _valid is not None:
+                kwargs = {k: v for k, v in kwargs.items() if k in _valid}
+            return _orig_jit(fn, **kwargs)
+
+        _jit_shim._kunlun_patched = True
+        _triton.jit = _jit_shim
+    except Exception:
+        # Best-effort compatibility shim; never block plugin import.
+        pass
+
+
+_shim_triton_jit_kwargs()
+
+
+def _shim_triton_knobs_module() -> None:
+    """Stub ``triton.knobs`` (triton 3.2+) for vllm's jit_monitor.
+
+    jit_monitor only assigns ``knobs.autotuning.print`` and hooks
+    ``knobs.runtime.jit_post_compile_hook``; a permissive namespace stub is
+    sufficient (kernels never actually JIT on Kunlun).
+    """
+    try:
+        import types as _types
+
+        import triton as _triton
+
+        if "triton.knobs" in sys.modules:
+            return
+        knobs = _types.ModuleType("triton.knobs")
+        knobs.autotuning = _types.SimpleNamespace(print=False)
+        knobs.runtime = _types.SimpleNamespace(jit_post_compile_hook=None)
+        sys.modules["triton.knobs"] = knobs
+        _triton.knobs = knobs
+    except Exception:
+        # Best-effort compatibility shim; never block plugin import.
+        pass
+
+
+_shim_triton_knobs_module()
+
+
 def _block_pyarrow_import() -> None:
     """Block ``import pyarrow`` — its native init segfaults in this environment.
 
@@ -655,6 +717,223 @@ for _target in (
     "vllm.model_executor.layers.quantization.mxfp4",
 ):
     _register_post_import_hook(_target, _mxfp4_oracle_applied, _mxfp4_oracle_apply)
+
+
+# --- hook 10: HCHeadOp -> xspeedgate mhc_head -------------------------------
+# HCHeadOp.forward_native raises NotImplementedError on Kunlun; upstream's
+# CUDA path uses a tilelang kernel and the ROCm fallback a Triton kernel,
+# neither runnable here. xspeedgate's mhc_head implements the same contract.
+def _hc_head_applied(mod):
+    hc = getattr(mod, "HCHeadOp", None)
+    if hc is None:
+        return False
+    return getattr(hc.forward_native, "_kunlun_patched", False)
+
+
+def _hc_head_apply(mod):
+    import torch
+
+    def _forward_native(
+        self,
+        hidden_states,
+        hc_fn,
+        hc_scale,
+        hc_base,
+        rms_norm_eps,
+        hc_eps,
+    ):
+        hc_mult, hidden_size = hidden_states.shape[-2:]
+        outer_shape = hidden_states.shape[:-2]
+        hs_flat = hidden_states.view(-1, hc_mult, hidden_size)
+        out = torch.ops.xspeedgate_ops.mhc_head(
+            hs_flat, hc_fn, hc_scale, hc_base, rms_norm_eps, hc_eps
+        )
+        return out.view(*outer_shape, hidden_size)
+
+    _forward_native._kunlun_patched = True
+    mod.HCHeadOp.forward_native = _forward_native
+    logging.getLogger("vllm_kunlun").info(
+        "[KunlunPlugin] HCHeadOp.forward_native -> xspeedgate mhc_head"
+    )
+
+
+_register_post_import_hook(
+    "vllm.model_executor.layers.mhc", _hc_head_applied, _hc_head_apply
+)
+
+
+# --- hook 11: bind_kv_cache treats Kunlun as xpu-alike ----------------------
+# vllm.v1.worker.utils.bind_kv_cache raises NotImplementedError on platforms
+# that are not cuda_alike/xpu/cpu; the Kunlun stack is CUDA-emulating, so the
+# cuda-alike branch is the right one. Scope the is_xpu override to the call.
+def _bind_kv_cache_applied(mod):
+    return getattr(mod.bind_kv_cache, "_kunlun_patched", False)
+
+
+def _bind_kv_cache_apply(mod):
+    orig_bind = mod.bind_kv_cache
+
+    def _bind_kv_cache_kunlun(*args, **kwargs):
+        from vllm.platforms import current_platform
+
+        orig_is_xpu = current_platform.is_xpu
+        current_platform.is_xpu = lambda: True
+        try:
+            return orig_bind(*args, **kwargs)
+        finally:
+            current_platform.is_xpu = orig_is_xpu
+
+    _bind_kv_cache_kunlun._kunlun_patched = True
+    mod.bind_kv_cache = _bind_kv_cache_kunlun
+    logging.getLogger("vllm_kunlun").info(
+        "[KunlunPlugin] bind_kv_cache patched (Kunlun treated as xpu-alike)"
+    )
+
+
+_register_post_import_hook(
+    "vllm.v1.worker.utils", _bind_kv_cache_applied, _bind_kv_cache_apply
+)
+
+
+# --- hook 12: skip sparse MLA triton warmup on Kunlun -----------------------
+def _sparse_mla_warmup_applied(mod):
+    fn = getattr(mod, "sparse_mla_triton_warmup_if_needed", None)
+    return fn is not None and getattr(fn, "_kunlun_patched", False)
+
+
+def _sparse_mla_warmup_apply(mod):
+    def _noop(worker):
+        import logging
+
+        logging.getLogger("vllm_kunlun").info(
+            "[KunlunPlugin] Skipping sparse_mla_triton_warmup_if_needed"
+        )
+
+    _noop._kunlun_patched = True
+    mod.sparse_mla_triton_warmup_if_needed = _noop
+
+
+_register_post_import_hook(
+    "vllm.model_executor.warmup.sparse_mla_triton_warmup",
+    _sparse_mla_warmup_applied,
+    _sparse_mla_warmup_apply,
+)
+
+
+# --- hook 13: skip the whole kernel warmup suite on Kunlun ------------------
+# kernel_warmup fans out to many Triton/CUDA warmups (mhc, sparse mla,
+# flashinfer autotune, deep gemm, minimax m3...), none of which can run on
+# Kunlun. Skip the entry point entirely.
+def _kernel_warmup_applied(mod):
+    fn = getattr(mod, "kernel_warmup", None)
+    return fn is not None and getattr(fn, "_kunlun_patched", False)
+
+
+def _kernel_warmup_apply(mod):
+    def _noop(worker):
+        import logging
+
+        logging.getLogger("vllm_kunlun").info(
+            "[KunlunPlugin] Skipping kernel_warmup (all Triton/CUDA warmups)"
+        )
+
+    _noop._kunlun_patched = True
+    mod.kernel_warmup = _noop
+
+
+_register_post_import_hook(
+    "vllm.model_executor.warmup.kernel_warmup",
+    _kernel_warmup_applied,
+    _kernel_warmup_apply,
+)
+
+
+# --- hook 14: compressed slot mapping -> torch (upstream indexer backend) ---
+# DeepseekV4IndexerBackend inherits the V3.2 indexer metadata builder, which
+# calls the Triton get_compressed_slot_mapping. Swap it for the torch-native
+# version in both the defining module and the indexer call-site binding.
+def _cslot_applied(mod):
+    ok = getattr(mod.get_compressed_slot_mapping, "_kunlun_patched", False)
+    if hasattr(mod, "build_prefill_chunk_metadata"):
+        ok = ok and getattr(mod.build_prefill_chunk_metadata, "_kunlun_patched", False)
+    return ok
+
+
+def _cslot_apply(mod):
+    import vllm_kunlun.models.deepseek_v4.kunlun_compressor_utils as _kcu
+
+    _kcu.get_compressed_slot_mapping._kunlun_patched = True
+    mod.get_compressed_slot_mapping = _kcu.get_compressed_slot_mapping
+    if hasattr(mod, "build_prefill_chunk_metadata"):
+        _kcu.build_prefill_chunk_metadata._kunlun_patched = True
+        mod.build_prefill_chunk_metadata = _kcu.build_prefill_chunk_metadata
+    logging.getLogger("vllm_kunlun").info(
+        "[KunlunPlugin] compressed slot mapping / prefill chunk metadata -> "
+        f"torch (patched in {mod.__name__})"
+    )
+
+
+for _target in (
+    "vllm.v1.attention.backends.mla.compressor_utils",
+    "vllm.v1.attention.backends.mla.indexer",
+):
+    _register_post_import_hook(_target, _cslot_applied, _cslot_apply)
+
+
+# --- hook 15: SWA metadata kernels + tile scheduler for Kunlun --------------
+def _swa_meta_applied(mod):
+    ok = getattr(
+        getattr(mod, "_compute_swa_indices_and_lens_kernel", None),
+        "_kunlun_patched",
+        False,
+    )
+    return ok
+
+
+def _swa_meta_apply(mod):
+    from vllm.platforms import current_platform
+
+    from vllm_kunlun.models.deepseek_v4 import kunlun_swa as _ks
+
+    mod._compute_swa_indices_and_lens_kernel = _ks.make_swa_indices_launchable()
+    mod._compute_dspark_noncausal_swa_indices_kernel = (
+        _ks.make_dspark_noncausal_launchable()
+    )
+    mod._compute_prefill_metadata_kernel = _ks._TorchFn(
+        _ks.compute_prefill_gather_lens
+    )
+
+    # build_tile_scheduler's platform early-return lists rocm/xpu/sm120 but
+    # not Kunlun (OOT); it would call the CUDA get_mla_metadata each decode
+    # step. Wrap it to return the all-None dict on Kunlun.
+    _none_out = {
+        getattr(mod, "_LAYER_TYPE_SWAONLY", "swa_only"): None,
+        getattr(mod, "_LAYER_TYPE_C4A", "c4a"): None,
+        getattr(mod, "_LAYER_TYPE_C128A", "c128a"): None,
+    }
+    for cls_name in ("DeepseekSparseSWAMetadataBuilder",):
+        cls = getattr(mod, cls_name, None)
+        if cls is None or not hasattr(cls, "build_tile_scheduler"):
+            continue
+        orig_bts = cls.build_tile_scheduler
+
+        def _bts(self, *args, _orig=orig_bts, _out=_none_out, **kwargs):
+            if current_platform.is_out_of_tree():
+                return dict(_out)
+            return _orig(self, *args, **kwargs)
+
+        cls.build_tile_scheduler = _bts
+
+    logging.getLogger("vllm_kunlun").info(
+        "[KunlunPlugin] SWA metadata kernels -> torch; tile scheduler skipped on Kunlun"
+    )
+
+
+_register_post_import_hook(
+    "vllm.v1.attention.backends.mla.sparse_swa",
+    _swa_meta_applied,
+    _swa_meta_apply,
+)
 
 
 # --- hook 9: sqrtsoftplus MoE routing torch fallback -------------------------
