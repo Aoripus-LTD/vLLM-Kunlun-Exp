@@ -85,7 +85,9 @@ class DeepseekV4KunlunAttention(DeepseekV4Attention):
 
     def _o_proj(self, o: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
         # XPU uses BF16 reference wo_a path (same as ROCm).
-        from vllm_kunlun.models.deepseek_v4.amd.rocm import rocm_inv_rope_einsum
+        from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
+            rocm_inv_rope_einsum,
+        )
 
         z = rocm_inv_rope_einsum(
             self.rotary_emb,

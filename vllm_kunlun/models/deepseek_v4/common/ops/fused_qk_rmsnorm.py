@@ -67,29 +67,12 @@ def fused_q_kv_rmsnorm(
     assert qr.stride(-1) == 1 and kv.stride(-1) == 1
     assert q_weight.is_contiguous() and kv_weight.is_contiguous()
 
-    q_size = qr.shape[1]
-    kv_size = kv.shape[1]
-    num_tokens = qr.shape[0]
-    qr_out = torch.empty_like(qr)
-    kv_out = torch.empty_like(kv)
-    if num_tokens == 0:
-        return qr_out, kv_out
+    # Kunlun: the Triton kernel cannot run here; use the torch-native form.
+    # Same math as the kernel: RMSNorm in fp32, single cast at store,
+    # variance over the full row (SIZE, not the unmasked count).
+    def _rmsnorm(x: torch.Tensor, w: torch.Tensor) -> torch.Tensor:
+        xf = x.float()
+        rrms = torch.rsqrt(xf.square().mean(dim=-1, keepdim=True) + eps)
+        return (xf * rrms * w.float()).to(x.dtype)
 
-    block_size = triton.next_power_of_2(max(q_size, kv_size))
-    _fused_q_kv_rmsnorm_kernel[(num_tokens, 2)](
-        qr,
-        qr_out,
-        q_weight,
-        qr.stride(0),
-        qr_out.stride(0),
-        kv,
-        kv_out,
-        kv_weight,
-        kv.stride(0),
-        kv_out.stride(0),
-        eps,
-        Q_SIZE=q_size,
-        KV_SIZE=kv_size,
-        BLOCK_SIZE=block_size,
-    )
-    return qr_out, kv_out
+    return _rmsnorm(qr, q_weight), _rmsnorm(kv, kv_weight)
