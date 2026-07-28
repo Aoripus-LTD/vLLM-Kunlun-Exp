@@ -152,7 +152,21 @@ class DeepseekV4FP8Config(Fp8Config):
                 return Mxfp4MoEMethod(layer.moe_config)
             # expert_dtype == "fp8": fall through to Fp8Config which
             # returns Fp8MoEMethod with block-wise float32 scales.
-        return super().get_quant_method(layer, prefix)
+        method = super().get_quant_method(layer, prefix)
+        # Kunlun: torch_xmlir cannot cast activations to float8, so the
+        # upstream dynamic-FP8-activation path cannot run. Dequantize FP8
+        # block weights to bf16 at load time instead (numerically exact).
+        from vllm.model_executor.layers.quantization.fp8 import Fp8LinearMethod
+
+        from vllm_kunlun.models.deepseek_v4.kunlun_fp8_linear import (
+            KunlunFp8BlockDequantLinearMethod,
+        )
+
+        if isinstance(method, Fp8LinearMethod) and not isinstance(
+            method, KunlunFp8BlockDequantLinearMethod
+        ):
+            method.__class__ = KunlunFp8BlockDequantLinearMethod
+        return method
 
     def is_mxfp4_quant(self, prefix, layer):
         if not isinstance(layer, RoutedExperts) or self.expert_dtype != "fp4":
