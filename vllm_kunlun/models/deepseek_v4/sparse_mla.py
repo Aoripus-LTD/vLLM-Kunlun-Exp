@@ -19,7 +19,12 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
     MultipleOf,
 )
-from vllm.v1.attention.backends.mla.compressor_utils import get_compressed_slot_mapping
+from vllm_kunlun.models.deepseek_v4.kunlun_compressor_utils import (
+    build_c128a_topk_metadata as kunlun_build_c128a_topk_metadata,
+)
+from vllm_kunlun.models.deepseek_v4.kunlun_compressor_utils import (
+    get_compressed_slot_mapping,
+)
 from vllm.v1.attention.backends.utils import split_decodes_and_prefills
 from vllm.v1.kv_cache_interface import AttentionSpec
 
@@ -263,7 +268,7 @@ class DeepseekV4FlashMLAMetadataBuilder(
             cm.positions is not None
         ), "positions is required for C128A metadata build"
         block_size = self.kv_cache_spec.block_size // self.compress_ratio
-        global_decode, decode_lens, prefill_local = build_c128a_topk_metadata(
+        global_decode, decode_lens, prefill_local = kunlun_build_c128a_topk_metadata(
             cm.positions[:num_total],
             self.compress_ratio,
             num_decode_tokens,
