@@ -577,22 +577,46 @@ def combine_topk_swa_indices(
     )
 
     NUM_WORKERS = 128
-    _combine_topk_swa_indices_kernel[(num_reqs, NUM_WORKERS)](
-        combined_indices,
-        combined_indices.stride(0),
-        combined_lens,
-        topk_indices,
-        topk_indices.stride(0),
-        query_start_loc,
-        seq_lens,
-        gather_lens,
-        M,
-        N,
-        TOP_K=topk,
-        COMPRESS_RATIO=compress_ratio,
-        WINDOW_SIZE=window_size,
-        PADDED_TOP_K=triton.next_power_of_2(topk_indices.shape[-1]),
-    )
+    # Kunlun: the combine kernel cannot run here; pure torch equivalent.
+    # Per request b, per query token t (pos = seq_len - query_len + t):
+    #   topk_len = min((pos+1)//compress_ratio, topk)
+    #   swa_len  = min(pos+1, window_size)
+    #   combined[t, :topk_len]            = topk_indices[t, :topk_len] + M*b
+    #   combined[t, topk_len+i]           = M*b + N + i + pos - swa_len + 1
+    #                                       - (seq_len - gather_len), i < swa_len
+    #   combined_lens[t]                  = topk_len + swa_len
+    base = int(query_start_loc[0].item())
+    for b in range(num_reqs):
+        query_start = int(query_start_loc[b].item()) - base
+        query_end = int(query_start_loc[b + 1].item()) - base
+        query_len = query_end - query_start
+        if query_len <= 0:
+            continue
+        seq_len = int(seq_lens[b].item())
+        gather_len = int(gather_lens[b].item())
+        start_pos = seq_len - query_len
+        gather_start = seq_len - gather_len
+        i = torch.arange(query_len, device=topk_indices.device)
+        pos = start_pos + i
+        topk_len = torch.minimum(
+            (pos + 1) // compress_ratio,
+            torch.full_like(pos, topk),
+        )
+        swa_len = torch.minimum(pos + 1, torch.full_like(pos, window_size))
+        for j, t in enumerate(range(query_start, query_end)):
+            tl_ = int(topk_len[j].item())
+            sl_ = int(swa_len[j].item())
+            p = int(pos[j].item())
+            if tl_ > 0:
+                combined_indices[t, :tl_] = (
+                    topk_indices[t, :tl_].to(torch.int64) + M * b
+                )
+            if sl_ > 0:
+                offs = torch.arange(sl_, device=topk_indices.device)
+                combined_indices[t, tl_ : tl_ + sl_] = (
+                    M * b + N + offs + p - sl_ + 1 - gather_start
+                )
+            combined_lens[t] = tl_ + sl_
     return combined_indices, combined_lens
 
 
