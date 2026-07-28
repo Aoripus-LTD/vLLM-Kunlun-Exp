@@ -603,6 +603,60 @@ _register_post_import_hook(
 )
 
 
+# --- hook 8: MXFP4 MoE backend fallback for Kunlun -------------------------
+# select_deepseek_v4_mxfp4_moe_backend raises NotImplementedError on Kunlun
+# (all candidate backends are CUDA/Intel/Triton-only). Fall back to the
+# Kunlun emulation experts (dequant-on-the-fly + torch-native MoE).
+def _mxfp4_oracle_applied(mod):
+    select_fn = getattr(mod, "select_deepseek_v4_mxfp4_moe_backend", None)
+    return getattr(select_fn, "_kunlun_patched", False)
+
+
+def _mxfp4_oracle_apply(mod):
+    # Same circular-import guard as hook 7: the hook can fire while the target
+    # module is still mid-import; skip and wait for a later import event.
+    if not hasattr(mod, "select_deepseek_v4_mxfp4_moe_backend"):
+        return
+    orig_select = mod.select_deepseek_v4_mxfp4_moe_backend
+
+    def _select_with_kunlun_fallback(config):
+        try:
+            return orig_select(config)
+        except NotImplementedError:
+            from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
+                Mxfp4MoeBackend,
+            )
+
+            from vllm_kunlun.models.deepseek_v4.kunlun_mxfp4_experts import (
+                KunlunEmulatedMxfp4Experts,
+            )
+
+            logging.getLogger("vllm_kunlun").warning(
+                "[KunlunPlugin] no native MXFP4 MoE backend on Kunlun; "
+                "falling back to KunlunEmulatedMxfp4Experts "
+                "(dequant-on-the-fly, slower)"
+            )
+            # Tag as XPU: Mxfp4MoEMethod only accepts TRTLLM/Triton/AITER/XPU
+            # tags, and the XPU weight-transform path is a passthrough
+            # (packed uint8 + e8m0 scales stay untouched), which is exactly
+            # what KunlunEmulatedMxfp4Experts expects.
+            return Mxfp4MoeBackend.XPU, KunlunEmulatedMxfp4Experts
+
+    _select_with_kunlun_fallback._kunlun_patched = True
+    mod.select_deepseek_v4_mxfp4_moe_backend = _select_with_kunlun_fallback
+    logging.getLogger("vllm_kunlun").info(
+        "[KunlunPlugin] patched select_deepseek_v4_mxfp4_moe_backend "
+        "with Kunlun emulation fallback"
+    )
+
+
+for _target in (
+    "vllm.model_executor.layers.fused_moe.oracle.mxfp4",
+    "vllm.model_executor.layers.quantization.mxfp4",
+):
+    _register_post_import_hook(_target, _mxfp4_oracle_applied, _mxfp4_oracle_apply)
+
+
 def _preload_mapped(full_name):
     """Load the kunlun replacement for ``full_name`` into sys.modules."""
     if full_name in sys.modules:

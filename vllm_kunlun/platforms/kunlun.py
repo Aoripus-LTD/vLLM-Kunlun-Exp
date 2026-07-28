@@ -27,6 +27,12 @@ class KunlunPlatform(Platform):
     ray_device_key: str = "GPU"
     device_name: str = "cuda"
     dispatch_key: str = "CUDA"
+    # vllm 0.25.1 has ~20 direct ``@torch.compile(backend=current_platform.
+    # simple_compile_backend)`` decorators (e.g. vocab_parallel_embedding).
+    # The default "inductor" backend generates Triton kernels, which Kunlun
+    # cannot execute (CUDA_ERROR_NOT_SUPPORTED). "eager" keeps the decorated
+    # functions running natively without any code generation.
+    simple_compile_backend: str = "eager"
 
     @property
     def device_type(self):
