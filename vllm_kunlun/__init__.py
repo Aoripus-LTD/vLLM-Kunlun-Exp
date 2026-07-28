@@ -563,6 +563,46 @@ _register_post_import_hook(
 )
 
 
+# --- hook 7: register Kunlun (OOT) scaled_mm linear kernels ----------------
+# vllm 0.25.1's kernels/linear chooser looks up _POSSIBLE_*_KERNELS dicts by
+# PlatformEnum; OOT has no entry and raises KeyError. Inject the Kunlun
+# Cutlass-based FP8 block kernel (its GEMM is backed by xspeedgate's
+# cutlass_scaled_mm via vllm_kunlun/ops/_custom_ops.py).
+def _scaled_mm_kernels_applied(mod):
+    from vllm.platforms.interface import PlatformEnum
+
+    return PlatformEnum.OOT in getattr(mod, "_POSSIBLE_FP8_BLOCK_KERNELS", {})
+
+
+def _scaled_mm_kernels_apply(mod):
+    # The hook fires as soon as the module appears in sys.modules, which can
+    # be mid-import (circular import): the _POSSIBLE_* dicts near the bottom
+    # of the file may not exist yet. Skip silently in that case; the hook is
+    # re-evaluated on later import events until applied() reports done.
+    if not hasattr(mod, "_POSSIBLE_FP8_BLOCK_KERNELS"):
+        return
+    from vllm.platforms.interface import PlatformEnum
+
+    from vllm_kunlun.ops.scaled_mm_kernels import (
+        KunlunCutlassFp8BlockScaledMMKernel,
+    )
+
+    mod._POSSIBLE_FP8_BLOCK_KERNELS[PlatformEnum.OOT] = [
+        KunlunCutlassFp8BlockScaledMMKernel
+    ]
+    logging.getLogger("vllm_kunlun").info(
+        "[KunlunPlugin] registered OOT FP8 block scaled_mm kernel "
+        "(xspeedgate cutlass_scaled_mm)"
+    )
+
+
+_register_post_import_hook(
+    "vllm.model_executor.kernels.linear",
+    _scaled_mm_kernels_applied,
+    _scaled_mm_kernels_apply,
+)
+
+
 def _preload_mapped(full_name):
     """Load the kunlun replacement for ``full_name`` into sys.modules."""
     if full_name in sys.modules:
