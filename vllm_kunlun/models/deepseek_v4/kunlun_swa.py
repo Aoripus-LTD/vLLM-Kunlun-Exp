@@ -30,7 +30,10 @@ def compute_swa_indices_and_lens(
         return
     device = swa_indices.device
     token_idx = torch.arange(n, device=device) + token_offset
-    valid = is_valid_token[token_idx]
+    n_avail = min(token_to_req_indices.shape[0], is_valid_token.shape[0])
+    in_range = token_idx < n_avail
+    token_idx = token_idx.clamp(0, n_avail - 1)
+    valid = is_valid_token[token_idx] & in_range
 
     swa_lens.zero_()
     swa_indices.fill_(-1)
