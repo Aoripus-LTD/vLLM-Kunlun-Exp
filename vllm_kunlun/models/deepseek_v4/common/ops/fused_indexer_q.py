@@ -2,9 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import torch
-from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
-from vllm.utils.import_utils import has_cutedsl
 
 # MXFP4: 32 elements per block, packed 2 nibbles per byte, ue8m0 block scale.
 MXFP4_BLOCK_SIZE = 32
@@ -298,151 +296,43 @@ def fused_indexer_q_rope_quant(
     torch.Tensor | tuple[torch.Tensor, torch.Tensor],
     torch.Tensor,
 ]:
-    """Fused RoPE + quantize Q for the sparse indexer.
+    """Fused RoPE + weight-fold for the sparse indexer (Kunlun torch path).
 
-    Weight-fold semantics (important — the two paths differ):
+    Kunlun cannot launch the Triton kernels, and torch-level fp8 casts are
+    unsupported by the XPU copy kernel. Q is therefore returned in bf16
+    (post-RoPE, with the same bf16 roundtrip the Triton kernels apply before
+    quantization) and left UNQUANTIZED: no per-token q_scale exists, so the
+    weights carry only the softmax and head scales (the same contract as the
+    upstream MXFP4 path). The Kunlun indexer consumer reads bf16 Q directly,
+    so skipping e4m3 quantization costs no accuracy.
 
-    FP8 path (use_fp4=False, default):
-        q_fp8      : (T, H, HEAD_DIM) platform fp8 (e4m3fnuz on gfx942,
-                     e4m3fn elsewhere); per-token-per-head scalar scale
-                     (NOT stored — folded into weights below)
-        weights_out = weights * q_scale * softmax_scale * head_scale
-        Rationale: a single per-token q_scale is a scalar the downstream FP8
-        logits kernel would otherwise multiply in. Folding it into `weights`
-        avoids emitting a separate tensor and is free for the logits kernel.
-
-    MXFP4 path (use_fp4=True):
-        q_packed   : (T, H, HEAD_DIM // 2) uint8 (2 E2M1 nibbles per byte)
-        q_scale    : (T, H, HEAD_DIM // MXFP4_BLOCK_SIZE) uint8 ue8m0 bytes
-        weights_out = weights * softmax_scale * head_scale
-        Rationale: MXFP4 has PER-BLOCK (32-element) scales that live with
-        the Q values — they cannot be folded into a per-token weight
-        scalar, so `weights` carries only the softmax and head scales.
-
-    Returns (q_quant, weights_out) where q_quant is either a Tensor (FP8) or
-    a (values, scales) tuple (MXFP4). This matches the union type accepted
-    by `SparseAttnIndexer.forward_*`.
+    Returns ``(q_bf16, weights_out)`` with ``q_bf16`` of shape
+    ``(T, H, HEAD_DIM)`` and ``weights_out`` fp32 of shape ``(T, H)``.
     """
     assert positions.ndim == 1
     assert index_q.ndim == 3
     assert index_q_cos_sin_cache.ndim == 2
 
-    num_tokens = positions.shape[0]
-    num_index_q_heads = index_q.shape[1]
-    index_q_head_dim = index_q.shape[2]
+    head_dim = index_q.shape[2]
+    half_rot = index_q_cos_sin_cache.shape[-1] // 2
+    nope_dim = head_dim - 2 * half_rot
 
-    index_weights_out = torch.empty_like(index_weights, dtype=torch.float32)
+    q = index_q.to(torch.float32)
+    out = q.clone()
+    if half_rot > 0:
+        cs = index_q_cos_sin_cache[positions.long()].to(torch.float32)
+        cos = cs[:, :half_rot].unsqueeze(1)  # [T, 1, half_rot]
+        sin = cs[:, half_rot:].unsqueeze(1)
+        x_even = q[..., nope_dim::2]
+        x_odd = q[..., nope_dim + 1 :: 2]
+        # GPT-J interleaved RoPE + bf16 roundtrip (matches Triton numerics).
+        r_even = (x_even * cos - x_odd * sin).to(torch.bfloat16).to(torch.float32)
+        r_odd = (x_odd * cos + x_even * sin).to(torch.bfloat16).to(torch.float32)
+        out[..., nope_dim::2] = r_even
+        out[..., nope_dim + 1 :: 2] = r_odd
 
-    if use_fp4:
-        assert index_q_head_dim % MXFP4_BLOCK_SIZE == 0, (
-            f"head_dim={index_q_head_dim} must be a multiple of MXFP4 block "
-            f"size {MXFP4_BLOCK_SIZE}"
-        )
-        num_scale_blocks = index_q_head_dim // MXFP4_BLOCK_SIZE
-        index_q_packed = torch.empty(
-            (num_tokens, num_index_q_heads, index_q_head_dim // 2),
-            dtype=torch.uint8,
-            device=index_q.device,
-        )
-        index_q_scale = torch.empty(
-            (num_tokens, num_index_q_heads, num_scale_blocks),
-            dtype=torch.uint8,
-            device=index_q.device,
-        )
-        if has_cutedsl():
-            # lazily import, otherwise some tests fail due to CUDA driver init failure.
-            from vllm_kunlun.models.deepseek_v4.nvidia.ops.fused_indexer_q_cutedsl import (
-                fused_indexer_q_rope_quant_mxfp4_cutedsl,
-            )
-
-            fused_indexer_q_rope_quant_mxfp4_cutedsl(
-                positions,
-                index_q,
-                index_q_cos_sin_cache,
-                index_weights,
-                index_weights_softmax_scale,
-                index_weights_head_scale,
-                index_q_packed,
-                index_q_scale,
-                index_weights_out,
-            )
-        else:
-            _fused_indexer_q_rope_mxfp4_kernel[(num_tokens, num_index_q_heads)](
-                positions,
-                index_q,
-                index_q.stride(0),
-                index_q.stride(1),
-                index_q_cos_sin_cache,
-                index_q_cos_sin_cache.stride(0),
-                index_q_cos_sin_cache.shape[-1] // 2,
-                index_q_packed,
-                index_q_packed.stride(0),
-                index_q_packed.stride(1),
-                index_q_scale,
-                index_q_scale.stride(0),
-                index_q_scale.stride(1),
-                index_q_head_dim,
-                MXFP4_BLOCK_SIZE,
-                index_weights,
-                index_weights.stride(0),
-                index_weights_softmax_scale,
-                index_weights_head_scale,
-                index_weights_out,
-                index_weights_out.stride(0),
-                num_warps=1,  # TODO: Tune this
-            )
-
-        # Values stay uint8 (2 E2M1 nibbles per byte). Scales are 4 ue8m0
-        # bytes per (token, head) reinterpreted as one int32, then squeezed
-        # from (T, H, 1) to (T, H) to match DeepGEMM's expected q_sf rank
-        # (prefill wants 2-D (seq_len, num_heads); decode reshapes this to
-        # 3-D (batch, next_n, num_heads)).
-        return (
-            index_q_packed,
-            index_q_scale.view(torch.int32).squeeze(-1),
-        ), index_weights_out
-
-    fp8_dtype = current_platform.fp8_dtype()
-    use_fnuz = fp8_dtype == torch.float8_e4m3fnuz
-    fp8_max = 224.0 if use_fnuz else 448.0
-    index_q_fp8 = torch.empty_like(index_q, dtype=fp8_dtype)
-    if has_cutedsl():
-        # lazily import, otherwise some tests fail due to CUDA driver init failure.
-        from vllm_kunlun.models.deepseek_v4.nvidia.ops.fused_indexer_q_cutedsl import (
-            fused_indexer_q_rope_quant_fp8_cutedsl,
-        )
-
-        fused_indexer_q_rope_quant_fp8_cutedsl(
-            positions,
-            index_q,
-            index_q_cos_sin_cache,
-            index_weights,
-            index_weights_softmax_scale,
-            index_weights_head_scale,
-            index_q_fp8,
-            index_weights_out,
-        )
-    else:
-        _fused_indexer_q_rope_quant_kernel[(num_tokens, num_index_q_heads)](
-            positions,
-            index_q,
-            index_q.stride(0),
-            index_q.stride(1),
-            index_q_cos_sin_cache,
-            index_q_cos_sin_cache.stride(0),
-            index_q_cos_sin_cache.shape[-1] // 2,
-            index_q_fp8,
-            index_q_fp8.stride(0),
-            index_q_fp8.stride(1),
-            index_q_head_dim,
-            index_weights,
-            index_weights.stride(0),
-            index_weights_softmax_scale,
-            index_weights_head_scale,
-            index_weights_out,
-            index_weights_out.stride(0),
-            FP8_MAX=fp8_max,
-            USE_FNUZ=use_fnuz,
-            num_warps=1,  # TODO: Tune this
-        )
-    return index_q_fp8, index_weights_out
+    index_q_bf16 = out.to(torch.bfloat16)
+    index_weights_out = index_weights.to(torch.float32) * (
+        index_weights_softmax_scale * index_weights_head_scale
+    )
+    return index_q_bf16, index_weights_out
