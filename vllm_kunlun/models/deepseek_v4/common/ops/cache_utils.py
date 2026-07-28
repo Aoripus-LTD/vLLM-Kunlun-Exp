@@ -176,42 +176,20 @@ def quantize_and_insert_k_cache(
     ), f"K must be [num_tokens, 512], got {k.shape}"
     assert k.dtype == torch.bfloat16, f"K must be bf16, got {k.dtype}"
     assert is_ue8m0, "Only support ue8m0 quantization."
-
-    # NOTE: When using DP, slot_mapping.shape[0] can be less than k.shape[0] due to
-    # padding. Always use slot_mapping.shape[0] as the token count.
-    num_tokens = slot_mapping.shape[0]
-    block_stride = k_cache.stride(0)  # bytes per block
-
-    TOKEN_FP8_DIM = 448
-    TOKEN_BF16_DIM = 64
-    TOKEN_SCALE_DIM = 8
-    QUANT_BLOCK_SIZE = 64
     if use_fnuz:
-        if not current_platform.is_fp8_fnuz():
-            raise ValueError("use_fnuz=True requires a platform using FNUZ FP8")
-        _, FP8_MAX = get_fp8_min_max()
-    else:
-        FP8_MAX = torch.finfo(torch.float8_e4m3fn).max
-    TOKEN_DATA_SIZE = TOKEN_FP8_DIM + TOKEN_BF16_DIM * 2
+        raise ValueError("FNUZ FP8 cache encoding is not supported on Kunlun")
 
-    grid = (num_tokens,)
+    # Kunlun: the Triton quantize_and_insert kernel cannot run here; use the
+    # torch-native equivalent (same 576B/token fp8_ds_mla layout).
+    from vllm_kunlun.models.deepseek_v4.kunlun_cache_insert import (
+        quantize_and_insert_k_cache_torch,
+    )
 
-    quantize_and_insert_k_kernel[grid](
+    quantize_and_insert_k_cache_torch(
         k,
-        slot_mapping,
         k_cache,
-        num_tokens,
-        input_dim=512,
-        fp8_dim=TOKEN_FP8_DIM,
-        bf16_dim=TOKEN_BF16_DIM,
-        scale_dim=TOKEN_SCALE_DIM,
-        quant_block=QUANT_BLOCK_SIZE,
-        cache_block_size=block_size,
-        token_data_size=TOKEN_DATA_SIZE,
-        block_stride=block_stride,
-        fp8_max=FP8_MAX,
-        n_quant_blocks=8,
-        use_fnuz=use_fnuz,
+        slot_mapping,
+        block_size=block_size,
     )
 
 
