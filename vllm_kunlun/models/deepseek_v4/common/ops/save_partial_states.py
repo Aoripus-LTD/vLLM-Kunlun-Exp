@@ -21,26 +21,23 @@ def save_partial_states(
 
     One program per token; pads (slot_id == -1) are skipped.
     """
-    num_actual = slot_mapping.shape[0]
-    head_size = kv.shape[-1]
-    _save_partial_states_kernel[(num_actual,)](
-        kv,
-        kv.stride(0),
-        score,
-        score.stride(0),
-        ape,
-        ape.stride(0),
-        positions,
-        state_cache,
-        state_cache.stride(0),
-        state_cache.stride(1),
-        slot_mapping,
-        block_size,
-        HEAD_SIZE=head_size,
-        TRITON_BLOCK_SIZE=triton.next_power_of_2(head_size),
-        STATE_WIDTH=state_width,
-        COMPRESS_RATIO=compress_ratio,
-        **(pdl_kwargs or {}),
+    # Kunlun: Triton kernel cannot run here; pure torch equivalent.
+    # state_cache[..., :STATE_WIDTH] = kv, [..., STATE_WIDTH:] = score + ape[pos % ratio].
+    n = min(slot_mapping.shape[0], kv.shape[0], positions.shape[0])
+    slot = slot_mapping[:n].long()
+    valid = slot >= 0
+    if not bool(valid.any()):
+        return
+    slot = slot[valid]
+    kv_v = kv[:n][valid]
+    score_v = score[:n][valid]
+    pos_v = positions[:n][valid].long()
+    block_idx = slot // block_size
+    pos_in_block = slot % block_size
+    head_size = kv_v.shape[-1]
+    state_cache[block_idx, pos_in_block, :head_size] = kv_v
+    state_cache[block_idx, pos_in_block, state_width : state_width + head_size] = (
+        score_v + ape[pos_v % compress_ratio]
     )
 
 
