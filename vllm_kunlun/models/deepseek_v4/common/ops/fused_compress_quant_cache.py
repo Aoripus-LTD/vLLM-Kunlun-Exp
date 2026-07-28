@@ -22,7 +22,6 @@ and N_QUANT_BLOCKS ue8m0 bytes.
 from typing import Any
 
 import torch
-
 from vllm.triton_utils import tl, triton
 
 from .fused_indexer_q import _fp32x2_to_fp4x2

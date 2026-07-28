@@ -15,7 +15,6 @@ preparation.
 """
 
 import torch
-
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     get_fp8_min_max,
 )
@@ -172,9 +171,9 @@ def quantize_and_insert_k_cache(
     platforms whose FP8 format is FNUZ. ``use_fnuz=False`` selects OCP E4M3,
     which is used by OCP-encoded caches even on gfx942.
     """
-    assert k.dim() == 2 and k.shape[1] == 512, (
-        f"K must be [num_tokens, 512], got {k.shape}"
-    )
+    assert (
+        k.dim() == 2 and k.shape[1] == 512
+    ), f"K must be [num_tokens, 512], got {k.shape}"
     assert k.dtype == torch.bfloat16, f"K must be bf16, got {k.dtype}"
     assert is_ue8m0, "Only support ue8m0 quantization."
 

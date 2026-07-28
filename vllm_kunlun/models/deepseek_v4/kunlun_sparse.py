@@ -10,23 +10,23 @@ Triton kernels for decode (FP8 dequant + BF16 attention) and prefill
 from typing import TYPE_CHECKING, cast
 
 import torch
-
 from vllm.forward_context import get_forward_context
+from vllm.v1.attention.ops.xpu_mla_sparse import triton_bf16_mla_sparse_interface
+from vllm.v1.worker.workspace import current_workspace_manager
+
 from vllm_kunlun.models.deepseek_v4.attention import DeepseekV4Attention
 from vllm_kunlun.models.deepseek_v4.common.ops import (
     combine_topk_swa_indices,
     compute_global_topk_indices_and_lens,
     dequantize_and_gather_k_cache,
 )
+from vllm_kunlun.models.deepseek_v4.kunlun_sparse_decode_fp8 import (
+    xpu_sparse_decode_fp8,
+)
 from vllm_kunlun.models.deepseek_v4.sparse_mla import (
     DeepseekV4FlashMLABackend,
     DeepseekV4FlashMLAMetadata,
 )
-from vllm_kunlun.models.deepseek_v4.kunlun_sparse_decode_fp8 import (
-    xpu_sparse_decode_fp8,
-)
-from vllm.v1.attention.ops.xpu_mla_sparse import triton_bf16_mla_sparse_interface
-from vllm.v1.worker.workspace import current_workspace_manager
 
 if TYPE_CHECKING:
     from vllm.v1.attention.backends.mla.sparse_swa import DeepseekSparseSWAMetadata
@@ -105,12 +105,12 @@ class DeepseekV4KunlunAttention(DeepseekV4Attention):
         positions: torch.Tensor,
         output: torch.Tensor,
     ) -> None:
-        assert output.shape == q.shape, (
-            f"output buffer shape {output.shape} must match q shape {q.shape}"
-        )
-        assert output.dtype == q.dtype, (
-            f"output buffer dtype {output.dtype} must match q dtype {q.dtype}"
-        )
+        assert (
+            output.shape == q.shape
+        ), f"output buffer shape {output.shape} must match q shape {q.shape}"
+        assert (
+            output.dtype == q.dtype
+        ), f"output buffer dtype {output.dtype} must match q dtype {q.dtype}"
 
         forward_context = get_forward_context()
         attn_metadata = forward_context.attn_metadata

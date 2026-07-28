@@ -7,7 +7,6 @@ from itertools import islice
 import regex as re
 import torch
 import torch.nn as nn
-
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.distributed import (
@@ -55,11 +54,12 @@ from vllm.model_executor.models.utils import (
     maybe_prefix,
 )
 from vllm.model_executor.utils import set_weight_attrs
-from vllm_kunlun.models.deepseek_v4.kunlun_sparse import DeepseekV4KunlunAttention
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import direct_register_custom_op
+
+from vllm_kunlun.models.deepseek_v4.kunlun_sparse import DeepseekV4KunlunAttention
 
 
 class DeepseekV4MLP(nn.Module):
@@ -759,9 +759,11 @@ class DeepseekV4MoE(nn.Module):
             hidden_states=hidden_states,
             gating_output=router_logits,
             scoring_func=self.scoring_func,
-            e_score_correction_bias=self.gate.e_score_correction_bias.data
-            if self.gate.e_score_correction_bias is not None
-            else None,
+            e_score_correction_bias=(
+                self.gate.e_score_correction_bias.data
+                if self.gate.e_score_correction_bias is not None
+                else None
+            ),
             topk=self.n_activated_experts,
             renormalize=self.renormalize,
             indices_type=self.hash_indices_dtype,
