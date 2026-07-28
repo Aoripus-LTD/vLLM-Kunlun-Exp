@@ -733,6 +733,11 @@ def _hc_head_applied(mod):
 def _hc_head_apply(mod):
     import torch
 
+    if not hasattr(mod, "HCHeadOp"):
+        # Hook fired on a partially-initialized module; it will be retried on
+        # later import events until applied() reports done.
+        return
+
     def _forward_native(
         self,
         hidden_states,

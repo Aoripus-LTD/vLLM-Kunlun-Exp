@@ -469,28 +469,23 @@ def compute_global_topk_indices_and_lens(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Map local topk indices to global KV cache slots and count valid entries.
 
-    Fuses three operations into a single kernel:
+    Kunlun: pure torch (the Triton kernel cannot run here). Three steps:
     1. Block-table lookup (local index → global slot id)
     2. Valid-entry counting (topk_lens per token)
     3. Masking padding tokens to length 0
     """
-    num_tokens = topk_indices.shape[0]
-    global_topk_indices = torch.empty_like(topk_indices)
-    topk_lens = torch.empty(num_tokens, dtype=torch.int32, device=topk_indices.device)
-    _compute_global_topk_indices_and_lens_kernel[(num_tokens,)](
-        global_topk_indices,
-        global_topk_indices.stride(0),
-        topk_lens,
-        topk_indices,
-        topk_indices.stride(0),
-        topk_indices.shape[-1],
-        token_to_req_indices,
-        block_table,
-        block_table.stride(0),
-        block_size,
-        is_valid_token,
-        TRITON_BLOCK_SIZE=1024,
+    local = topk_indices.long()
+    valid = local >= 0
+    reqs = token_to_req_indices.long()
+    # Clamp the block_table read into range; out-of-range columns belong to
+    # invalid entries and are masked out by the where below.
+    block_ids = (local // block_size).clamp(0, block_table.shape[1] - 1)
+    block_numbers = block_table[reqs.unsqueeze(1), block_ids].long()
+    slots = block_numbers * block_size + local % block_size
+    global_topk_indices = torch.where(valid, slots, torch.full_like(slots, -1)).to(
+        topk_indices.dtype
     )
+    topk_lens = (valid.sum(dim=-1, dtype=torch.int32)) * is_valid_token.to(torch.int32)
     return global_topk_indices, topk_lens
 
 
