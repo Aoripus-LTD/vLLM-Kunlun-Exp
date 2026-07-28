@@ -369,6 +369,36 @@ class DeepseekCompressor(nn.Module):
             compress_norm_rope_store_fn = compress_norm_rope_store_triton
             extra_kwargs = {}
 
+        # Kunlun: neither the cutedsl nor the triton compress kernel can run
+        # here. For head_dim == 512 (attention compressor) use the torch-native
+        # fused implementation; other variants fall through to the upstream
+        # triton path for now (will be replaced as they are hit).
+        if self.head_dim == 512:
+            from vllm_kunlun.models.deepseek_v4.kunlun_compressor import (
+                compress_norm_rope_store_512_torch,
+            )
+
+            compress_norm_rope_store_512_torch(
+                state_cache=state_cache,
+                num_actual=num_actual,
+                token_to_req_indices=token_to_req_indices,
+                positions=positions,
+                slot_mapping=slot_mapping,
+                block_table=block_table,
+                block_size=block_size,
+                state_width=state_width,
+                cos_sin_cache=cos_sin_cache,
+                kv_cache=kv_cache,
+                kv_slot_mapping=k_cache_metadata.slot_mapping,
+                kv_block_size=kv_cache.shape[1],
+                rms_norm_weight=self.norm.weight,
+                rms_norm_eps=self.rms_norm_eps,
+                rope_head_dim=self.rope_head_dim,
+                compress_ratio=self.compress_ratio,
+                overlap=self.overlap,
+            )
+            return
+
         compress_norm_rope_store_fn(
             state_cache=state_cache,
             num_actual=num_actual,
