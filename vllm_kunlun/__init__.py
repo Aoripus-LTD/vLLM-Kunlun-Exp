@@ -657,6 +657,39 @@ for _target in (
     _register_post_import_hook(_target, _mxfp4_oracle_applied, _mxfp4_oracle_apply)
 
 
+# --- hook 9: sqrtsoftplus MoE routing torch fallback -------------------------
+# fused_topk_bias_router.vllm_topk_softplus_sqrt dispatches to the CUDA-only
+# torch.ops._moe_C.topk_softplus_sqrt unless current_platform.is_xpu(); Kunlun
+# is OOT so it hits the missing op. Force the pure-torch fallback that upstream
+# keeps for XPU/CPU (same semantics: sqrt(softplus) scores, correction bias
+# for selection only, hash-table experts, optional renorm, route scaling).
+def _sqrtsoftplus_router_applied(mod):
+    fn = getattr(mod, "vllm_topk_softplus_sqrt", None)
+    return fn is not None and getattr(fn, "_kunlun_patched", False)
+
+
+def _sqrtsoftplus_router_apply(mod):
+    torch_fn = getattr(mod, "_topk_softplus_sqrt_torch", None)
+    if torch_fn is None:
+        return  # module mid-import; retry on a later import event
+
+    def _kunlun_topk_softplus_sqrt(*args, **kwargs):
+        return torch_fn(*args, **kwargs)
+
+    _kunlun_topk_softplus_sqrt._kunlun_patched = True
+    mod.vllm_topk_softplus_sqrt = _kunlun_topk_softplus_sqrt
+    logging.getLogger("vllm_kunlun").info(
+        "[KunlunPlugin] patched vllm_topk_softplus_sqrt -> torch fallback"
+    )
+
+
+_register_post_import_hook(
+    "vllm.model_executor.layers.fused_moe.router.fused_topk_bias_router",
+    _sqrtsoftplus_router_applied,
+    _sqrtsoftplus_router_apply,
+)
+
+
 def _preload_mapped(full_name):
     """Load the kunlun replacement for ``full_name`` into sys.modules."""
     if full_name in sys.modules:
