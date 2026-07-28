@@ -22,6 +22,57 @@ from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.import_utils import has_cutedsl
 
+from vllm_kunlun.models.deepseek_v4.kunlun_indexer import _e4m3_lut
+
+# fp8_ds_mla paged-cache layout constants (per-token 576B data + per-block
+# scale region), shared by the torch gather/dequant helpers below.
+TOKEN_FP8_DIM = 448
+TOKEN_BF16_DIM = 64
+TOKEN_SCALE_DIM = 8
+TOKEN_DATA_SIZE = TOKEN_FP8_DIM + TOKEN_BF16_DIM * 2  # 576
+N_QUANT_BLOCKS = 7  # 448 / 64
+
+
+def dequant_ds_mla_576_rows_torch(
+    rows_u8: torch.Tensor,  # [n, 576] uint8 (448 e4m3 + 64 bf16-as-bytes)
+    scale_u8: torch.Tensor,  # [n, 7] uint8 ue8m0 group scales (64 dims/group)
+) -> torch.Tensor:
+    """Dequantize 576B fp8_ds_mla token rows to fp32 [n, 512].
+
+    No fp8 dtype casts (Kunlun copy kernel rejects them): e4m3 values are
+    decoded through the fp32 LUT indexed by raw bytes, ue8m0 scales as
+    2^(byte-127).
+    """
+    lut = _e4m3_lut(rows_u8.device)
+    nope = lut[rows_u8[:, :TOKEN_FP8_DIM].long()]  # [n, 448] fp32
+    scales = torch.exp2(scale_u8.float() - 127.0)  # [n, 7]
+    nope = nope * scales.repeat_interleave(TOKEN_FP8_DIM // N_QUANT_BLOCKS, dim=1)
+    rope = rows_u8[:, TOKEN_FP8_DIM:TOKEN_DATA_SIZE].contiguous().view(
+        torch.bfloat16
+    ).float()
+    return torch.cat([nope, rope], dim=-1)
+
+
+def gather_ds_mla_slots_torch(
+    cache: torch.Tensor,  # [num_blocks, ...] uint8 paged fp8_ds_mla cache
+    block_size: int,
+    slots: torch.Tensor,  # [n] int64 global slot ids, all >= 0
+) -> torch.Tensor:
+    """Gather and dequantize rows at global slot ids. Returns fp32 [n, 512]."""
+    device = slots.device
+    cache2d = cache.reshape(cache.shape[0], -1)
+    block_ids = slots // block_size
+    pos_in_block = slots % block_size
+    data_off = (pos_in_block * TOKEN_DATA_SIZE).unsqueeze(1) + torch.arange(
+        TOKEN_DATA_SIZE, device=device
+    )
+    rows = cache2d[block_ids.unsqueeze(1), data_off]  # [n, 576]
+    scale_off = (
+        block_size * TOKEN_DATA_SIZE + pos_in_block * TOKEN_SCALE_DIM
+    ).unsqueeze(1) + torch.arange(N_QUANT_BLOCKS, device=device)
+    sbytes = cache2d[block_ids.unsqueeze(1), scale_off]  # [n, 7]
+    return dequant_ds_mla_576_rows_torch(rows, sbytes)
+
 
 @triton.jit
 def quantize_and_insert_k_kernel(
@@ -388,16 +439,25 @@ def dequantize_and_gather_k_cache(
         )
         return
 
-    dequantize_and_gather_k_cache_triton(
-        out,
-        k_cache,
-        seq_lens,
-        gather_lens,
-        block_table,
-        block_size,
-        offset,
-        use_fnuz=use_fnuz,
-    )
+    # Kunlun: the Triton gather kernel cannot run here; use the torch-native
+    # equivalent (same fp8_ds_mla 576B/token layout, OCP e4m3 + ue8m0 scales).
+    # Per request b, gather ``gather_len`` (default ``seq_len``) tokens ending
+    # at position ``seq_len - 1`` into out[b, offset : offset + gather_len].
+    num_reqs = seq_lens.shape[0]
+    device = out.device
+    for b in range(num_reqs):
+        seq_len = int(seq_lens[b].item())
+        gather_len = seq_len if gather_lens is None else int(gather_lens[b].item())
+        if gather_len <= 0:
+            continue
+        start_pos = seq_len - gather_len
+        pos = start_pos + torch.arange(gather_len, device=device, dtype=torch.long)
+        block_in_seq = pos // block_size
+        pos_in_block = pos % block_size
+        phys_blocks = block_table[b].long()[block_in_seq]  # [gather_len]
+        slots = phys_blocks * block_size + pos_in_block
+        rows = gather_ds_mla_slots_torch(k_cache, block_size, slots)
+        out[b, offset : offset + gather_len] = rows.to(out.dtype)
 
 
 def compute_global_topk_indices_and_lens(
