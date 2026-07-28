@@ -117,42 +117,24 @@ def xpu_qnorm_rope_kv_fp8_insert(
     block_size: int,
 ):
     """XPU Triton: qnorm+rope on Q, rope on KV, then FP8 UE8M0 quant+insert."""
-    from vllm_kunlun.models.deepseek_v4.common.ops.cache_utils import (
-        quantize_and_insert_k_cache,
+    from vllm_kunlun.models.deepseek_v4.kunlun_cache_insert import (
+        qnorm_rope_q_inplace,
+        quantize_and_insert_k_cache_torch,
+        rope_kv,
     )
 
-    num_tokens = q.shape[0]
-    num_heads = q.shape[1]
-
-    # Allocate temp buffer for RoPE-applied KV
-    kv_roped = torch.empty_like(kv)
-
-    # Grid: one program per (token, head_or_kv)
-    # head_idx < num_heads: process Q head
-    # head_idx == num_heads: process KV
-    grid = (num_tokens, num_heads + 1)
-    _xpu_qnorm_rope_kernel[grid](
-        q,
-        kv,
-        kv_roped,
-        positions,
-        cos_sin_cache,
-        eps,
-        num_tokens,
-        num_heads=num_heads,
-        HEAD_DIM=HEAD_DIM,
-        ROPE_DIM=ROPE_DIM,
-        NOPE_DIM=NOPE_DIM,
-        HALF_ROPE=HALF_ROPE,
+    # Kunlun: Triton kernels cannot run here; use the torch-native versions.
+    # slot_mapping/positions may cover more tokens than q/kv (padding);
+    # clamp to the common count for the rope+insert parts.
+    n = min(
+        q.shape[0], kv.shape[0], positions.shape[0], slot_mapping.shape[0]
     )
-
-    # FP8 UE8M0 quant + paged insert (reuse existing Triton kernel)
-    # swa_kv_cache may be [num_blocks, block_size, 584] or [num_blocks, flat]
-    # quantize_and_insert_k_cache expects [num_blocks, block_bytes] uint8
+    qnorm_rope_q_inplace(q, positions[:n], cos_sin_cache, eps)
+    kv_roped = rope_kv(kv[:n], positions[:n], cos_sin_cache)
     cache_2d = swa_kv_cache.view(swa_kv_cache.shape[0], -1)
-    quantize_and_insert_k_cache(
+    quantize_and_insert_k_cache_torch(
         kv_roped,
         cache_2d,
-        slot_mapping,
+        slot_mapping[:n],
         block_size=block_size,
     )
