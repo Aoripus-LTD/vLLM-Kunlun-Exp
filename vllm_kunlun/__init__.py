@@ -34,6 +34,161 @@ def _configure_kunlun_logger() -> logging.Logger:
 _POST_IMPORT_DISPATCH_IN_PROGRESS = {"v": False}
 
 
+def _patch_infer_schema_pep585() -> None:
+    """Alias PEP 585 builtin generics in torch's custom-op schema table.
+
+    torch 2.5.1's ``torch._library.infer_schema.SUPPORTED_PARAM_TYPES`` only
+    knows the ``typing`` spellings (``List[int]``, ``Sequence[int]`` ...).
+    Upstream vllm 0.25.1 (built for newer torch) also uses the PEP 585
+    builtin spellings (``list[int]`` ...), whose dict lookup fails on
+    torch 2.5.1, crashing custom-op registration at import time. Map the
+    builtin aliases to the same schema strings as their typing equivalents.
+    """
+    try:
+        import collections.abc as _abc
+        import functools as _functools
+        import operator as _operator
+        import types as _types
+        import typing as _typing
+
+        from torch._library import infer_schema as _infer_schema
+
+        def _to_pep585(tp):
+            """Convert a typing spelling to its PEP 585/604 runtime spelling.
+
+            On py3.10, ``typing.List[int]``/``typing.Optional[...]`` are
+            different objects (different hash) from ``list[int]``/``X | None``,
+            so annotations written in PEP 585/604 style miss the dict lookup.
+            """
+            if isinstance(tp, _types.UnionType):
+                return _functools.reduce(
+                    _operator.or_, [_to_pep585(a) for a in tp.__args__]
+                )
+            origin = _typing.get_origin(tp)
+            if origin is None:
+                return tp
+            if origin is _typing.Union:
+                return _functools.reduce(
+                    _operator.or_, [_to_pep585(a) for a in _typing.get_args(tp)]
+                )
+            if origin is list:
+                return list[_to_pep585(_typing.get_args(tp)[0])]
+            if origin is _abc.Sequence:
+                return _abc.Sequence[_to_pep585(_typing.get_args(tp)[0])]
+            return tp
+
+        supported = _infer_schema.SUPPORTED_PARAM_TYPES
+        additions = {}
+        for key, value in list(supported.items()):
+            try:
+                additions.setdefault(_to_pep585(key), value)
+            except TypeError:
+                continue
+        supported.update(additions)
+    except Exception:
+        # Best-effort compatibility shim; never block plugin import.
+        pass
+
+
+_patch_infer_schema_pep585()
+
+
+def _shim_torch_251_missing_modules() -> None:
+    """Provide stub modules that vllm 0.25.1 imports but torch 2.5.1 lacks.
+
+    - ``torch._inductor.custom_graph_pass`` (torch 2.6+): vllm's
+      ``compilation/passes/inductor_pass.py`` imports ``CustomGraphPass`` at
+      module top level. The abstract contract is a callable taking an
+      ``fx.Graph``; compilation passes never actually run on Kunlun
+      (enforce-eager), so a faithful-shape stub is sufficient.
+    """
+    try:
+        import torch._inductor  # noqa: F401
+
+        if "torch._inductor.custom_graph_pass" in sys.modules:
+            return
+        try:
+            import torch._inductor.custom_graph_pass  # noqa: F401
+            return
+        except ImportError:
+            pass
+
+        import types as _types
+
+        mod = _types.ModuleType("torch._inductor.custom_graph_pass")
+
+        class CustomGraphPass:
+            """Stub matching torch 2.6+'s CustomGraphPass interface."""
+
+            def __call__(self, graph) -> None:
+                raise NotImplementedError(
+                    "CustomGraphPass is not available on torch 2.5.1 (Kunlun)"
+                )
+
+        mod.CustomGraphPass = CustomGraphPass
+        sys.modules["torch._inductor.custom_graph_pass"] = mod
+        import torch._inductor as _inductor
+
+        _inductor.custom_graph_pass = mod
+    except Exception:
+        # Best-effort compatibility shim; never block plugin import.
+        pass
+
+
+_shim_torch_251_missing_modules()
+
+
+def _shim_transformers_457_missing_attrs() -> None:
+    """Backfill attrs that vllm 0.25.1 imports from newer transformers (5.x).
+
+    - ``transformers.configuration_utils.ALLOWED_LAYER_TYPES``: 5.x union of
+      the attention and MLP layer-type tuples; 4.57.1 only carries the two
+      separate tuples.
+    """
+    try:
+        import transformers.configuration_utils as _cu
+
+        if not hasattr(_cu, "ALLOWED_LAYER_TYPES"):
+            _cu.ALLOWED_LAYER_TYPES = (
+                _cu.ALLOWED_ATTENTION_LAYER_TYPES + _cu.ALLOWED_MLP_LAYER_TYPES
+            )
+    except Exception:
+        # Best-effort compatibility shim; never block plugin import.
+        pass
+
+
+_shim_transformers_457_missing_attrs()
+
+
+def _shim_torch_251_missing_dtypes() -> None:
+    """Alias low-precision dtypes that vllm 0.25.1 references but torch 2.5.1 lacks.
+
+    Byte-layout equivalents (these aliases only make attribute access and
+    ``.view()`` shape math work; actual numeric interpretation lives in the
+    Triton/custom kernels, which decode the packed bytes themselves):
+
+    - ``torch.float8_e8m0fnu`` (torch 2.5+ MX scale dtype, 1B) -> ``uint8``
+    - ``torch.float4_e2m1fn_x2`` (packed 2xFP4, 1B) -> ``uint8``
+    - ``torch.float4_e2m1fn`` (4-bit) -> ``uint4``
+    """
+    try:
+        import torch as _torch
+
+        for _name, _alias in (
+            ("float8_e8m0fnu", "uint8"),
+            ("float4_e2m1fn_x2", "uint8"),
+            ("float4_e2m1fn", "uint4"),
+        ):
+            if not hasattr(_torch, _name):
+                setattr(_torch, _name, getattr(_torch, _alias))
+    except Exception:
+        # Best-effort compatibility shim; never block plugin import.
+        pass
+
+
+_shim_torch_251_missing_dtypes()
+
+
 _MODULE_MAPPINGS = {
     "vllm.compilation.wrapper": "vllm_kunlun.compilation.wrapper",
     "vllm.model_executor.model_loader.bitsandbytes_loader": "vllm_kunlun.models.model_loader.bitsandbytes_loader",
