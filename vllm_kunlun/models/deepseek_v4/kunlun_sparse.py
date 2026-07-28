@@ -84,12 +84,13 @@ class DeepseekV4KunlunAttention(DeepseekV4Attention):
         return num_heads
 
     def _o_proj(self, o: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
-        # XPU uses BF16 reference wo_a path (same as ROCm).
-        from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
-            rocm_inv_rope_einsum,
+        # Kunlun cannot launch the ROCm Triton inv-RoPE kernel; use the
+        # pure-torch equivalent (same numerics).
+        from vllm_kunlun.models.deepseek_v4.kunlun_inv_rope_einsum import (
+            kunlun_inv_rope_einsum,
         )
 
-        z = rocm_inv_rope_einsum(
+        z = kunlun_inv_rope_einsum(
             self.rotary_emb,
             o,
             positions,
