@@ -44,7 +44,9 @@ def _e4m3_pos_values(device: torch.device) -> tuple[torch.Tensor, torch.Tensor]:
             if exp == 0:
                 v = man * (2.0**-9)
             elif exp == 15 and man == 7:
-                v = float("nan")
+                # e4m3fn code 0x7F is NaN; keep the midpoint grid monotonic by
+                # using a value above the max normal (448) for searchsorted.
+                v = 464.0
             else:
                 v = (1.0 + man / 8.0) * (2.0 ** (exp - 7))
             vals.append(v)
@@ -55,12 +57,16 @@ def _e4m3_pos_values(device: torch.device) -> tuple[torch.Tensor, torch.Tensor]:
 
 
 def fp32_to_e4m3_bytes(x: torch.Tensor) -> torch.Tensor:
-    """Round fp32 to nearest OCP e4m3 and return raw uint8 codes (no cast)."""
+    """Round fp32 to nearest OCP e4m3 and return raw uint8 codes (no cast).
+
+    e4m3fn has no inf; code 0x7F is NaN, so quantized codes are clamped to
+    126 (448.0) — near-max inputs must never become the NaN byte.
+    """
     _, mid = _e4m3_pos_values(x.device)
     x = x.clamp(-FP8_MAX, FP8_MAX)
     sign = (x < 0).to(torch.uint8) << 7
     ax = x.abs()
-    codes = torch.searchsorted(mid, ax.contiguous())
+    codes = torch.searchsorted(mid, ax.contiguous()).clamp(max=126)
     return (sign | codes.to(torch.uint8)).contiguous()
 
 
