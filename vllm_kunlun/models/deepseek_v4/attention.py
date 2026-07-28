@@ -387,10 +387,11 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             compressor = self.compressor
 
             def compressor_kv_score() -> torch.Tensor:
+                # torch 2.5.1 has no mm(out_dtype=...); upcast inputs to
+                # fp32 instead (same fp32 accumulate + fp32 output).
                 return torch.mm(
-                    hidden_states,
-                    compressor.fused_wkv_wgate.weight.T,
-                    out_dtype=torch.float32,
+                    hidden_states.float(),
+                    compressor.fused_wkv_wgate.weight.T.float(),
                 )
 
             aux_fns[0] = compressor_kv_score
@@ -404,10 +405,10 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
                 return weights
 
             def indexer_compressor_kv_score() -> torch.Tensor:
+                # Same torch 2.5.1 workaround as compressor_kv_score above.
                 return torch.mm(
-                    hidden_states,
-                    indexer.compressor.fused_wkv_wgate.weight.T,
-                    out_dtype=torch.float32,
+                    hidden_states.float(),
+                    indexer.compressor.fused_wkv_wgate.weight.T.float(),
                 )
 
             aux_fns[1] = indexer_weights_proj
