@@ -233,11 +233,19 @@ class KunlunPlatform(Platform):
             # we default to FlashMLA backend, so we need to force the blocksize
             # here
             use_sparse = hasattr(vllm_config.model_config.hf_config, "index_topk")
+            # vllm 0.25.1 removed envs.VLLM_ATTENTION_BACKEND; treat it as
+            # unset (None) while remaining compatible with older vllm.
+            _vllm_attn_backend = getattr(envs, "VLLM_ATTENTION_BACKEND", None)
             use_flashmla = (
-                envs.VLLM_ATTENTION_BACKEND is None
-                or envs.VLLM_ATTENTION_BACKEND == "FLASHMLA"
+                _vllm_attn_backend is None or _vllm_attn_backend == "FLASHMLA"
             )
-            from vllm.attention.ops.flashmla import is_flashmla_supported
+            try:
+                # vllm 0.25.1 moved/renamed this helper
+                from vllm.v1.attention.ops.flashmla import (
+                    is_flashmla_dense_supported as is_flashmla_supported,
+                )
+            except ImportError:
+                from vllm.attention.ops.flashmla import is_flashmla_supported
 
             if (
                 use_flashmla
