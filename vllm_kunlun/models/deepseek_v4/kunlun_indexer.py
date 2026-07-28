@@ -98,9 +98,29 @@ def sparse_indexer_torch(
         return topk_indices_buffer
 
     num_tokens, n_head, head_dim = q_quant.shape
-    req_id_per_token = meta.req_id_per_token  # [T]
-    block_table = meta.block_table  # [num_reqs, max_pages]
-    positions = positions.to(req_id_per_token.device)
+    # req id per token: the indexer-cache metadata (V3.2-style) does not carry
+    # it; borrow it from any V4 attention metadata in the dict (it is a
+    # per-token global field shared by all layers).
+    req_id_per_token = getattr(meta, "req_id_per_token", None)
+    if req_id_per_token is None:
+        for v in attn_metadata.values():
+            req_id_per_token = getattr(v, "req_id_per_token", None)
+            if req_id_per_token is not None:
+                break
+    block_table = getattr(meta, "block_table", None)
+    if block_table is None:
+        # V3.2-style indexer metadata: block table lives in decode/prefill sub-metadata.
+        dec = getattr(meta, "decode", None)
+        if dec is not None and getattr(dec, "block_table", None) is not None:
+            block_table = dec.block_table
+        else:
+            pf = getattr(meta, "prefill", None)
+            chunks = getattr(pf, "chunks", None) if pf is not None else None
+            if chunks:
+                block_table = chunks[0].block_table
+    if block_table is None:
+        return topk_indices_buffer
+    positions = positions.to(q_quant.device)
 
     out = topk_indices_buffer
     out.fill_(-1)
