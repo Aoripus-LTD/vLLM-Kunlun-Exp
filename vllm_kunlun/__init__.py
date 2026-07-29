@@ -719,10 +719,16 @@ for _target in (
     _register_post_import_hook(_target, _mxfp4_oracle_applied, _mxfp4_oracle_apply)
 
 
-# --- hook 10: HCHeadOp -> xspeedgate mhc_head -------------------------------
+# --- hook 10: HCHeadOp -> torch-native hc_head --------------------------------
 # HCHeadOp.forward_native raises NotImplementedError on Kunlun; upstream's
 # CUDA path uses a tilelang kernel and the ROCm fallback a Triton kernel,
-# neither runnable here. xspeedgate's mhc_head implements the same contract.
+# neither runnable here. xspeedgate's mhc_head turned out to be numerically
+# unreliable for this contract (logits collapsed to confident garbage), so
+# use a plain-torch implementation of the reference hc_head instead:
+#   rsqrt  = rsqrt(mean(flat_res^2) + rms_norm_eps)
+#   mixes  = linear(flat_res, hc_fn) * rsqrt
+#   gate   = sigmoid(mixes * hc_scale + hc_base) + hc_eps
+#   out    = sum_i gate_i * res_i
 def _hc_head_applied(mod):
     hc = getattr(mod, "HCHeadOp", None)
     if hc is None:
@@ -732,6 +738,7 @@ def _hc_head_applied(mod):
 
 def _hc_head_apply(mod):
     import torch
+    import torch.nn.functional as F
 
     if not hasattr(mod, "HCHeadOp"):
         # Hook fired on a partially-initialized module; it will be retried on
@@ -749,16 +756,18 @@ def _hc_head_apply(mod):
     ):
         hc_mult, hidden_size = hidden_states.shape[-2:]
         outer_shape = hidden_states.shape[:-2]
-        hs_flat = hidden_states.view(-1, hc_mult, hidden_size)
-        out = torch.ops.xspeedgate_ops.mhc_head(
-            hs_flat, hc_fn, hc_scale, hc_base, rms_norm_eps, hc_eps
-        )
-        return out.view(*outer_shape, hidden_size)
+        hs = hidden_states.view(-1, hc_mult, hidden_size)
+        xf = hs.flatten(1).float()
+        rsqrt = torch.rsqrt(xf.square().mean(-1, keepdim=True) + rms_norm_eps)
+        mixes = F.linear(xf, hc_fn.float()) * rsqrt
+        gate = torch.sigmoid(mixes * hc_scale.float() + hc_base.float()) + hc_eps
+        out = (gate.unsqueeze(-1) * hs.float()).sum(dim=1)
+        return out.view(*outer_shape, hidden_size).to(hidden_states.dtype)
 
     _forward_native._kunlun_patched = True
     mod.HCHeadOp.forward_native = _forward_native
     logging.getLogger("vllm_kunlun").info(
-        "[KunlunPlugin] HCHeadOp.forward_native -> xspeedgate mhc_head"
+        "[KunlunPlugin] HCHeadOp.forward_native -> torch-native hc_head"
     )
 
 
