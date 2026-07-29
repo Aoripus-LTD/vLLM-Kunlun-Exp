@@ -138,11 +138,7 @@ def sparse_indexer_torch(
     for t in range(num_tokens):
         r = int(req_id_per_token[t].item())
         p = int(positions[t].item())
-        # Only COMPLETE compression groups exist in the fp8 KV cache (the
-        # compressor writes a group when (pos+1) % ratio == 0). The current
-        # partially-filled group is not in the cache yet; counting it would
-        # read uninitialized/stale rows (nondeterministic garbage).
-        n_valid = (p + 1) // compress_ratio
+        n_valid = p // compress_ratio + 1
         if n_valid <= 0:
             continue
         pages = block_table[r]  # [max_pages]
