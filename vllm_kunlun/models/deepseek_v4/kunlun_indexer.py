@@ -22,6 +22,8 @@ K cache — with no fp8 casts (Kunlun's copy kernel rejects them):
   pad the rest with -1.
 """
 
+import os
+
 import torch
 
 # e4m3 grid in fp32 (sign 1 / exp 4 / man 3, OCP e4m3fn)
@@ -94,6 +96,12 @@ def sparse_indexer_torch(
             dtype=torch.int32,
             device=q_quant.device,
         )
+    # Experiment switch (uncommitted): DSV4_SWA_ONLY=1 disables the compressed
+    # topk entirely — used to bisect garbage output between the compressed
+    # path and the SWA/attention core. Remove after the investigation.
+    if os.environ.get("DSV4_SWA_ONLY") == "1":
+        topk_indices_buffer.fill_(-1)
+        return topk_indices_buffer
     if not isinstance(attn_metadata, dict):
         return topk_indices_buffer
     meta = attn_metadata.get(k_cache_module.prefix)
