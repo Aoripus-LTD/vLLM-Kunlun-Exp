@@ -12,8 +12,11 @@ K cache — with no fp8 casts (Kunlun's copy kernel rejects them):
 - logits[t, j] = sum_h weights[t, h] * dot(q[t, h, :], K[j, :])
   (fp32 accumulate), where weights [T, n_head] come from weights_proj.
 - Causal bound in compressed units: a token at position p may read compressed
-  entries 0 .. p // compress_ratio (inclusive; its own partially-filled group
-  entry is continuously overwritten by the compressor, so it is valid).
+  entries 0 .. (p+1) // compress_ratio - 1 (complete groups only; the partial
+  group is never written to the fp8 cache — the compressor only writes at
+  group boundaries — so reading it would return stale rows). This matches the
+  upstream C128A metadata kernel ((position+1) // compress_ratio) and the
+  prefill combine kernel's topk_len formula.
 - topk = min(topk_tokens, available); when fewer valid entries exist than
   topk_tokens we return all of them (exact full attention over the cache) and
   pad the rest with -1.
