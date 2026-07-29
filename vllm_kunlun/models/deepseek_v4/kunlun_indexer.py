@@ -169,8 +169,11 @@ def sparse_indexer_torch(
         k_fp32 = lut[rows[:, :head_dim].long()] * rows[:, head_dim : head_dim + 4].view(
             torch.float32
         )
-        # logits[t, j] = sum_h weights[t,h] * dot(q[t,h,:], K[j,:])
+        # logits[t, j] = sum_h weights[t,h] * relu(dot(q[t,h,:], K[j,:]))
+        # (ReLU before weighting, per upstream triton mqa_logits kernel and
+        # the reference implementation: scores -> relu -> * weights -> sum_h)
         logits_h = torch.einsum("hd,jd->hj", q_quant[t].float(), k_fp32)  # [H, J]
+        logits_h = logits_h.clamp_min_(0)
         logits = torch.einsum("hj,h->j", logits_h, weights[t].float())  # [J]
         logits = logits.masked_fill(~valid_slot, float("-inf"))
         k_take = min(topk_tokens, n_valid)
