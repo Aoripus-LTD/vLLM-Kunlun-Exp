@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import typing
+import os
 from collections.abc import Callable, Iterable
 from itertools import islice
 
@@ -821,6 +822,7 @@ class DeepseekV4DecoderLayer(nn.Module):
         aux_stream_list: list | None = None,
     ):
         super().__init__()
+        self._layer_index = extract_layer_index(prefix)
 
         # Lazy import to avoid top-level tilelang dependency.
         # Registers both torch.ops.vllm.mhc_pre and mhc_post
@@ -955,7 +957,33 @@ class DeepseekV4DecoderLayer(nn.Module):
             )
 
         x = self.attn_norm(x)
+        # Component-level debug dump (uncommitted): DSV4_COMP_DIR gates saving
+        # attn_in / attn_out / ffn_out for the first two layers during a real
+        # prefill (positions strictly arange) on TP rank 0.
+        _comp_dir = os.environ.get("DSV4_COMP_DIR") or None
+        _dump_comp = (
+            _comp_dir is not None
+            and self._layer_index < 2
+            and x.shape[0] > 1
+            and positions.numel() > 1
+            and bool((positions.flatten().diff() == 1).all().item())
+        )
+        if _dump_comp:
+            from vllm.distributed import get_tensor_model_parallel_rank as _gtr
+
+            _dump_comp = _gtr() == 0
+        if _dump_comp:
+            os.makedirs(_comp_dir, exist_ok=True)
+            torch.save(
+                x.detach().float().cpu(),
+                os.path.join(_comp_dir, f"vllm_layer{self._layer_index}_attn_in.pt"),
+            )
         x = self.attn(positions, x, None)
+        if _dump_comp:
+            torch.save(
+                x.detach().float().cpu(),
+                os.path.join(_comp_dir, f"vllm_layer{self._layer_index}_attn_out.pt"),
+            )
 
         residual, post_mix, res_mix, x = self.mhc_fused_post_pre(
             x,
@@ -973,6 +1001,11 @@ class DeepseekV4DecoderLayer(nn.Module):
         )
         x = self.ffn_norm(x)
         x = self.ffn(x, input_ids)
+        if _dump_comp:
+            torch.save(
+                x.detach().float().cpu(),
+                os.path.join(_comp_dir, f"vllm_layer{self._layer_index}_ffn_out.pt"),
+            )
         return x, residual, post_mix, res_mix
 
 
@@ -1115,7 +1148,44 @@ class DeepseekV4Model(nn.Module):
             input_ids = input_ids.to(torch.int64)
 
         residual, post_mix, res_mix = None, None, None
-        for layer in islice(self.layers, self.start_layer, self.end_layer):
+        # Debug dump (uncommitted): when DSV4_DUMP_DIR is set, save the
+        # residual stream after every decoder layer during prefill on TP
+        # rank 0, for layer-wise numerical comparison against the reference
+        # implementation. Remove after the investigation.
+        _dump_dir = os.environ.get("DSV4_DUMP_DIR") or None
+        if (
+            _dump_dir is not None
+            and get_tensor_model_parallel_rank() == 0
+            and input_ids is not None
+            and input_ids.shape[-1] > 1
+        ):
+            print(
+                f"[DSV4_DUMP] ids_shape={tuple(input_ids.shape)} "
+                f"pos_shape={tuple(positions.shape)} "
+                f"pos_first8={positions.flatten()[:8].tolist()} "
+                f"pos_last={int(positions.flatten()[-1].item())}",
+                flush=True,
+            )
+        _do_dump = (
+            _dump_dir is not None
+            and get_tensor_model_parallel_rank() == 0
+            and input_ids is not None
+            and input_ids.shape[-1] > 1
+            and positions.numel() > 1
+            and bool((positions.flatten().diff() == 1).all().item())
+        )
+        if _do_dump:
+            os.makedirs(_dump_dir, exist_ok=True)
+            torch.save(
+                input_ids.detach().cpu(), os.path.join(_dump_dir, "vllm_input_ids.pt")
+            )
+            torch.save(
+                positions.detach().cpu(), os.path.join(_dump_dir, "vllm_positions.pt")
+            )
+        for _li, layer in enumerate(
+            islice(self.layers, self.start_layer, self.end_layer),
+            start=self.start_layer,
+        ):
             hidden_states, residual, post_mix, res_mix = layer(
                 hidden_states,
                 positions,
@@ -1124,6 +1194,12 @@ class DeepseekV4Model(nn.Module):
                 res_mix,
                 residual,
             )
+            if _do_dump:
+                _hs = layer.hc_post(hidden_states, residual, post_mix, res_mix)
+                torch.save(
+                    _hs.detach().float().cpu(),
+                    os.path.join(_dump_dir, f"vllm_layer_{_li}.pt"),
+                )
         # The fused path defers the final hc_post to the next layer's
         # fused_post_pre. After the last layer we must apply it explicitly.
         if layer is not None:

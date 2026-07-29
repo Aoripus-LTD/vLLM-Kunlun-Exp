@@ -340,6 +340,11 @@ class DeepseekV4KunlunAttention(DeepseekV4Attention):
             # Kunlun: triton_bf16_mla_sparse_interface cannot run here; do the
             # sparse attention in torch: per token, softmax over its combined
             # index set (lens + >=0 mask) of q·K*scale, weighted sum of K.
+            # The attention sink joins the softmax as an extra logit column
+            # (same as the decode path and the reference: it only contributes
+            # to the denominator), otherwise short-context tokens — token 0
+            # above all — get a badly mis-scaled output.
+            sink = self.attn_sink.float()
             for t in range(query_start, query_end):
                 rel = t - query_start
                 idx = combined_indices[rel]
@@ -350,5 +355,6 @@ class DeepseekV4KunlunAttention(DeepseekV4Attention):
                     continue
                 k = kv_ws[idx.long(), 0].float()  # [n, D]
                 s = (q[t].float() @ k.T) * self.scale  # [H, n]
+                s = torch.cat([s, sink.unsqueeze(1)], dim=-1)  # [H, n+1]
                 p = torch.softmax(s, dim=-1)
-                output[t] = (p @ k).to(output.dtype)
+                output[t] = (p[:, : idx.numel()] @ k).to(output.dtype)
