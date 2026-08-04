@@ -146,10 +146,19 @@ def sparse_indexer_torch(
     kv_full = kv.reshape(-1, row_w)
 
     lut = _e4m3_lut(q_quant.device)
-    # Batch-fetch per-token scalars once (each .item() on Kunlun is a full
-    # device sync; 3 per token per sparse layer added up to seconds per step).
-    req_cpu = req_id_per_token.cpu()
-    pos_cpu = positions.cpu()
+    # Batch-fetch per-token scalars once per forward step (shared by all
+    # compressor/indexer layers; the vLLM V1 ForwardContext object is fresh
+    # every step, so caching on it is safe). Every .cpu() on Kunlun is a full
+    # device sync.
+    from vllm.forward_context import get_forward_context
+
+    fc = get_forward_context()
+    cpu_meta = getattr(fc, "_kunlun_cpu_meta", None) if fc is not None else None
+    if cpu_meta is None:
+        cpu_meta = (positions.cpu(), req_id_per_token.cpu())
+        if fc is not None:
+            fc._kunlun_cpu_meta = cpu_meta
+    pos_cpu, req_cpu = cpu_meta
     for t in range(num_tokens):
         r = int(req_cpu[t])
         p = int(pos_cpu[t])
