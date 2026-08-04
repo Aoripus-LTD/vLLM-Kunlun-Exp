@@ -374,6 +374,72 @@ class DeepseekCompressor(nn.Module):
         # fused implementation; other variants fall through to the upstream
         # triton path for now (will be replaced as they are hit).
         if self.head_dim == 512:
+            reqs_cpu = token_to_req_indices[:num_actual].cpu()
+            pos_cpu = positions[:num_actual].cpu()
+            # C4 decode fast path: xspeedgate compress_forward_fast on the
+            # ring-buffer layout (A/B validated rel=0 vs the reference math).
+            # Only when every request in this forward contributes exactly one
+            # token (pure decode); prefill/mixed batches keep the torch path
+            # so the paged state cache stays the single source for backfill.
+            if self.overlap:
+                counts = torch.bincount(
+                    reqs_cpu.long(), minlength=max(1, int(reqs_cpu.max().item()) + 1)
+                )
+                is_pure_decode = bool((counts[reqs_cpu.long()] == 1).all().item())
+                if is_pure_decode:
+                    from vllm_kunlun.models.deepseek_v4.kunlun_compressor_native import (
+                        NativeC4Ring,
+                        build_ape_op,
+                        compress_decode_native_c4,
+                    )
+
+                    if getattr(self, "_native_ring", None) is None:
+                        self._native_ring = NativeC4Ring(
+                            self.max_num_reqs, self.head_dim, state_cache.device
+                        )
+                        self._native_ape_op = build_ape_op(
+                            self.ape.data, self.compress_ratio, self.head_dim
+                        )
+                    ring = self._native_ring
+                    # 首个 decode 步：把分页 state_cache 的最近 8 个状态回填进 ring
+                    for req in reqs_cpu.unique().tolist():
+                        if not bool(ring.ready[req]):
+                            tok = (reqs_cpu == req).nonzero().flatten()[0]
+                            cur_pos = int(pos_cpu[tok])
+                            ring.backfill(
+                                req,
+                                cur_pos,
+                                state_cache,
+                                block_table[req],
+                                block_size,
+                            )
+                            ring.ready[req] = True
+                    compress_decode_native_c4(
+                        ring,
+                        self._native_ape_op,
+                        kv_score,
+                        pos_cpu,
+                        reqs_cpu,
+                        (pos_cpu + 1).to(torch.int32).to(kv_score.device),
+                        k_cache_metadata.slot_mapping,
+                        cos_sin_cache,
+                        kv_cache,
+                        kv_cache.shape[1],
+                        self.norm.weight,
+                        self.rms_norm_eps,
+                        self.rope_head_dim,
+                        self.compress_ratio,
+                    )
+                    return
+
+            # torch 路径（prefill/混合批）：新请求（含 position 0）复位 ring，
+            # 防止上一个使用同槽位请求的压缩状态串扰。
+            if getattr(self, "_native_ring", None) is not None:
+                for req in reqs_cpu.unique().tolist():
+                    if int(pos_cpu[reqs_cpu == req].min()) == 0:
+                        self._native_ring.ring[req].zero_()
+                        self._native_ring.ready[req] = False
+
             from vllm_kunlun.models.deepseek_v4.kunlun_compressor import (
                 compress_norm_rope_store_512_torch,
             )
