@@ -296,6 +296,16 @@ class DeepseekCompressor(nn.Module):
         block_table = state_metadata.block_table
         block_size = state_metadata.block_size
 
+        # CPU copies of positions/reqs are shared by all 41 compressor layers
+        # in this step — fetch once per forward on the forward context instead
+        # of two device syncs per layer.
+        fc = get_forward_context()
+        cpu_meta = getattr(fc, "_kunlun_cpu_meta", None)
+        if cpu_meta is None:
+            cpu_meta = (positions.cpu(), token_to_req_indices[:num_actual].cpu())
+            fc._kunlun_cpu_meta = cpu_meta
+        pos_cpu, reqs_cpu = cpu_meta
+
         # [num_blocks, block_size, kv_dim+score_dim], where kv_dim == score_dim
         state_cache = self.state_cache.kv_cache
         # kv_state stored in first half, score_state stored in second half
@@ -374,8 +384,6 @@ class DeepseekCompressor(nn.Module):
         # fused implementation; other variants fall through to the upstream
         # triton path for now (will be replaced as they are hit).
         if self.head_dim == 512:
-            reqs_cpu = token_to_req_indices[:num_actual].cpu()
-            pos_cpu = positions[:num_actual].cpu()
             # C4 decode fast path: xspeedgate compress_forward_fast on the
             # ring-buffer layout (A/B validated rel=0 vs the reference math).
             # Only when every request in this forward contributes exactly one
@@ -429,6 +437,11 @@ class DeepseekCompressor(nn.Module):
                         self.rms_norm_eps,
                         self.rope_head_dim,
                         self.compress_ratio,
+                    )
+                    import logging as _logging
+
+                    _logging.getLogger("vllm_kunlun").info(
+                        "[KunlunPlugin] native C4 compressor path used (decode)"
                     )
                     return
 
