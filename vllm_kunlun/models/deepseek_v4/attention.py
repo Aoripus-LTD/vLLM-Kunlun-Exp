@@ -450,6 +450,8 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         # on the default stream so q stays on its consumer stream (forward_mqa
         # downstream reads q on default). Indexer/compressor go on aux for
         # overlap with default's GEMM + cache write.
+        from vllm_kunlun.models.deepseek_v4.prof import prof
+
         if self.indexer is not None:
             aux_streams = self.aux_stream_list
             indexer = self.indexer
@@ -458,27 +460,33 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             compressor = self.compressor
 
             def wq_b_kv_insert() -> torch.Tensor:
-                q = self.wq_b(qr).view(-1, self.n_local_heads, self.head_dim)
-                q = self._fused_qnorm_rope_kv_insert(q, kv, positions, attn_metadata)
+                with prof("wq_b_kv_insert"):
+                    q = self.wq_b(qr).view(-1, self.n_local_heads, self.head_dim)
+                    q = self._fused_qnorm_rope_kv_insert(q, kv, positions, attn_metadata)
                 return q
 
             # 3-way overlap (matches TRT-LLM PR #14142 Level 1): default runs
             # wq_b+kv_insert; slot [0] runs the full indexer; slot [1] runs the
             # MLA compressor. Slot [2] is reserved for the indexer's inner
             # overlap. ROCm (aux_streams is None) falls back to sequential.
-            q, _ = execute_in_parallel(
-                wq_b_kv_insert,
-                [
-                    lambda: indexer(
+            def _run_indexer() -> torch.Tensor:
+                with prof("indexer"):
+                    return indexer(
                         hidden_states,
                         qr,
                         indexer_kv_score,
                         indexer_weights,
                         positions,
                         self.indexer_rotary_emb,
-                    ),
-                    lambda: compressor(kv_score, positions, self.rotary_emb),
-                ],
+                    )
+
+            def _run_compressor() -> None:
+                with prof("compressor"):
+                    return compressor(kv_score, positions, self.rotary_emb)
+
+            q, _ = execute_in_parallel(
+                wq_b_kv_insert,
+                [_run_indexer, _run_compressor],
                 self.ln_events[0],
                 [self.ln_events[1], self.ln_events[2]],
                 [aux_streams[0], aux_streams[1]] if aux_streams is not None else None,
@@ -492,25 +500,32 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             compressor = self.compressor
 
             def wq_b_kv_insert() -> torch.Tensor:
-                q = self.wq_b(qr).view(-1, self.n_local_heads, self.head_dim)
-                q = self._fused_qnorm_rope_kv_insert(q, kv, positions, attn_metadata)
+                with prof("wq_b_kv_insert"):
+                    q = self.wq_b(qr).view(-1, self.n_local_heads, self.head_dim)
+                    q = self._fused_qnorm_rope_kv_insert(q, kv, positions, attn_metadata)
                 return q
+
+            def _run_compressor2() -> None:
+                with prof("compressor"):
+                    return compressor(kv_score, positions, self.rotary_emb)
 
             q, _ = maybe_execute_in_parallel(
                 wq_b_kv_insert,
-                lambda: compressor(kv_score, positions, self.rotary_emb),
+                _run_compressor2,
                 self.ln_events[0],
                 self.ln_events[1],
                 aux_stream,
             )
         else:
             # SWA-only layer: no compressor, no overlap.
-            q = self.wq_b(qr).view(-1, self.n_local_heads, self.head_dim)
-            q = self._fused_qnorm_rope_kv_insert(q, kv, positions, attn_metadata)
+            with prof("wq_b_kv_insert"):
+                q = self.wq_b(qr).view(-1, self.n_local_heads, self.head_dim)
+                q = self._fused_qnorm_rope_kv_insert(q, kv, positions, attn_metadata)
 
         # MLA attention writes into the pre-allocated `out` buffer
         # ([num_tokens, padded_heads, head_dim]).
-        self.forward_mqa(q, kv, positions, out)
+        with prof("forward_mqa"):
+            self.forward_mqa(q, kv, positions, out)
 
     def _fused_qnorm_rope_kv_insert(
         self,

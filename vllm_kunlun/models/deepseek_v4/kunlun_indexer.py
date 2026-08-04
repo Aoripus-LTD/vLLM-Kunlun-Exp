@@ -146,9 +146,13 @@ def sparse_indexer_torch(
     kv_full = kv.reshape(-1, row_w)
 
     lut = _e4m3_lut(q_quant.device)
+    # Batch-fetch per-token scalars once (each .item() on Kunlun is a full
+    # device sync; 3 per token per sparse layer added up to seconds per step).
+    req_cpu = req_id_per_token.cpu()
+    pos_cpu = positions.cpu()
     for t in range(num_tokens):
-        r = int(req_id_per_token[t].item())
-        p = int(positions[t].item())
+        r = int(req_cpu[t])
+        p = int(pos_cpu[t])
         # Only COMPLETE compression groups exist in the fp8 KV cache (the
         # compressor writes a group when (pos+1) % ratio == 0). The current
         # partially-filled group is not in the cache yet; counting it would
