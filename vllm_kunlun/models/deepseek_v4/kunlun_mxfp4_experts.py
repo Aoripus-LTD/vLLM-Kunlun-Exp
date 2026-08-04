@@ -91,11 +91,8 @@ class KunlunEmulatedMxfp4Experts(OCP_MXQuantizationEmulationTritonExperts):
         assert w1.dtype == torch.uint8
         assert w2.dtype == torch.uint8
 
-        w1_dq = dequant_mxfp4_torch(w1, self.w1_scale_val, hidden_states.dtype)
-        w2_dq = dequant_mxfp4_torch(w2, self.w2_scale_val, hidden_states.dtype)
-
         x = hidden_states
-        num_local = w1_dq.shape[0]
+        num_local = w1.shape[0]
         topk_weights = topk_weights.to(x.dtype)
 
         if expert_map is not None:
@@ -108,19 +105,25 @@ class KunlunEmulatedMxfp4Experts(OCP_MXQuantizationEmulationTritonExperts):
         # (vllm SiluAndMulWithClamp semantics).
         limit = getattr(self.quant_config, "gemm1_clamp_limit", None)
 
+        # Dequantize ONLY the activated local experts. The old path dequantized
+        # the full local expert set on every forward (32 experts x 16 MB packed
+        # per layer per step — the dominant decode cost), while a decode step
+        # activates at most top-k (6) of them.
+        uniq = torch.unique(local_ids[local_ids >= 0])
+        w1_dq = dequant_mxfp4_torch(w1[uniq], self.w1_scale_val[uniq], x.dtype)
+        w2_dq = dequant_mxfp4_torch(w2[uniq], self.w2_scale_val[uniq], x.dtype)
+
         result = torch.zeros_like(output)
-        for e in range(num_local):
+        for e_sel, e in enumerate(uniq.tolist()):
             mask = local_ids == e
-            if not mask.any():
-                continue
             tok_idx, slot_idx = mask.nonzero(as_tuple=True)
             xe = x[tok_idx]
-            h = xe @ w1_dq[e].T
+            h = xe @ w1_dq[e_sel].T
             gate, up = h.chunk(2, dim=-1)
             if limit is not None:
                 gate = gate.clamp(max=limit)
                 up = up.clamp(min=-limit, max=limit)
-            ye = (F.silu(gate) * up) @ w2_dq[e].T
+            ye = (F.silu(gate) * up) @ w2_dq[e_sel].T
             if not apply_router_weight_on_input:
                 ye = ye * topk_weights[tok_idx, slot_idx].unsqueeze(-1)
             result.index_add_(0, tok_idx, ye)
