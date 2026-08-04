@@ -227,6 +227,8 @@ class DeepseekV4KunlunAttention(DeepseekV4Attention):
             nope_head_dim=self.nope_head_dim,
             rope_head_dim=self.rope_head_dim,
             out=output,
+            compress_ratio=self.compress_ratio,
+            seq_lens=swa_metadata.seq_lens,
         )
 
     def _forward_prefill(
