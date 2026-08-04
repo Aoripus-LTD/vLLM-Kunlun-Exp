@@ -1220,7 +1220,17 @@ class DeepseekV4Model(nn.Module):
             self.rms_norm_eps,
             self.hc_eps,
         )
+        if _do_dump:
+            torch.save(
+                hidden_states.detach().float().cpu(),
+                os.path.join(_dump_dir, "vllm_hc_head_out.pt"),
+            )
         hidden_states = self.norm(hidden_states)
+        if _do_dump:
+            torch.save(
+                hidden_states.detach().float().cpu(),
+                os.path.join(_dump_dir, "vllm_final_hidden.pt"),
+            )
         return hidden_states
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
