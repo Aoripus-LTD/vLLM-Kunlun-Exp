@@ -771,6 +771,137 @@ def _hc_head_apply(mod):
     )
 
 
+# --- hook 11: MHC pre/post/fused 的 sinkhorn 循环 -> xspeedgate fused_sinkhorn --
+# 上游 mhc_pre_torch 在 [T,4,4] 上跑 2*sinkhorn_repeat-1 次小归一化（约 40 个
+# 小算子/层），fused_sinkhorn 单算子语义一致（A/B rel 2.4e-5，双随机）。
+def _mhc_ops_applied(mod):
+    pre = getattr(mod, "MHCPreOp", None)
+    fused = getattr(mod, "MHCFusedPostPreOp", None)
+    if pre is None or fused is None:
+        return False
+    return getattr(pre.forward_native, "_kunlun_patched", False) and getattr(
+        fused.forward_native, "_kunlun_patched", False
+    )
+
+
+def _mhc_ops_apply(mod):
+    import torch
+    import torch.nn.functional as F
+
+    for cls_name in ("MHCPreOp", "MHCPostOp", "MHCFusedPostPreOp"):
+        if not hasattr(mod, cls_name):
+            return
+
+    def _sinkhorn(comb_logits, sinkhorn_repeat, eps):
+        return torch.ops.xspeedgate_ops.fused_sinkhorn(
+            comb_logits, sinkhorn_repeat, eps
+        )
+
+    def _mhc_pre(
+        self,
+        residual,
+        fn,
+        hc_scale,
+        hc_base,
+        rms_eps,
+        hc_pre_eps,
+        hc_sinkhorn_eps,
+        hc_post_mult_value,
+        sinkhorn_repeat,
+        n_splits: int = 1,
+    ):
+        # 与上游 mhc_pre_torch 逐项一致，仅 sinkhorn 段换成融合算子。
+        hc_mult = residual.shape[-2]
+        outer_shape = residual.shape[:-2]
+        residual_flat = residual.view(-1, hc_mult, residual.shape[-1])
+        num_tokens = residual_flat.shape[0]
+        x = residual_flat.view(num_tokens, -1).to(torch.float32)
+        mixes = torch.matmul(x, fn.t())
+        sqrsum = x.square().sum(dim=-1, keepdim=True)
+        mixes = mixes * torch.rsqrt(sqrsum / x.shape[-1] + rms_eps)
+
+        pre_logits = mixes[:, :hc_mult] * hc_scale[0] + hc_base[:hc_mult]
+        pre_mix = torch.sigmoid(pre_logits) + hc_pre_eps
+
+        post_logits = (
+            mixes[:, hc_mult : 2 * hc_mult] * hc_scale[1]
+            + hc_base[hc_mult : 2 * hc_mult]
+        )
+        post_mix = torch.sigmoid(post_logits) * hc_post_mult_value
+
+        comb_logits = mixes[:, 2 * hc_mult :].view(
+            num_tokens, hc_mult, hc_mult
+        ) * hc_scale[2] + hc_base[2 * hc_mult :].view(1, hc_mult, hc_mult)
+        comb_mix = _sinkhorn(comb_logits, sinkhorn_repeat, hc_sinkhorn_eps)
+
+        layer_input = torch.sum(
+            pre_mix.unsqueeze(-1) * residual_flat.to(torch.float32), dim=1
+        ).to(torch.bfloat16)
+        return (
+            post_mix.view(*outer_shape, hc_mult, 1),
+            comb_mix.view(*outer_shape, hc_mult, hc_mult),
+            layer_input.view(*outer_shape, residual.shape[-1]),
+        )
+
+    def _mhc_post(self, x, residual, post_layer_mix, comb_res_mix):
+        mixed_residual = torch.einsum(
+            "...ij,...ih->...jh",
+            comb_res_mix.to(torch.float32),
+            residual.to(torch.float32),
+        )
+        post_term = post_layer_mix.to(torch.float32) * x.unsqueeze(-2).to(torch.float32)
+        return (mixed_residual + post_term).to(residual.dtype)
+
+    def _mhc_fused_post_pre(
+        self,
+        x,
+        residual,
+        post_layer_mix,
+        comb_res_mix,
+        fn,
+        hc_scale,
+        hc_base,
+        rms_eps,
+        hc_pre_eps,
+        hc_sinkhorn_eps,
+        hc_post_mult_value,
+        sinkhorn_repeat,
+        n_splits: int = 1,
+        tile_n: int = 1,
+        norm_weight=None,
+        norm_eps: float = 0.0,
+    ):
+        residual_cur = _mhc_post(self, x, residual, post_layer_mix, comb_res_mix)
+        post_mix_cur, comb_mix_cur, layer_input_cur = _mhc_pre(
+            self,
+            residual_cur,
+            fn,
+            hc_scale,
+            hc_base,
+            rms_eps,
+            hc_pre_eps,
+            hc_sinkhorn_eps,
+            hc_post_mult_value,
+            sinkhorn_repeat,
+        )
+        return residual_cur, post_mix_cur, comb_mix_cur, layer_input_cur
+
+    _mhc_pre._kunlun_patched = True
+    _mhc_post._kunlun_patched = True
+    _mhc_fused_post_pre._kunlun_patched = True
+    mod.MHCPreOp.forward_native = _mhc_pre
+    mod.MHCPostOp.forward_native = _mhc_post
+    mod.MHCFusedPostPreOp.forward_native = _mhc_fused_post_pre
+    logging.getLogger("vllm_kunlun").info(
+        "[KunlunPlugin] MHC pre/post/fused sinkhorn -> xspeedgate fused_sinkhorn"
+    )
+
+
+_register_post_import_hook(
+    "vllm.model_executor.layers.mhc", _mhc_ops_applied, _mhc_ops_apply
+)
+
+
 _register_post_import_hook(
     "vllm.model_executor.layers.mhc", _hc_head_applied, _hc_head_apply
 )
