@@ -117,30 +117,46 @@ class KunlunEmulatedMxfp4Experts(OCP_MXQuantizationEmulationTritonExperts):
             w2_dq = dequant_mxfp4_torch(w2[uniq], self.w2_scale_val[uniq], x.dtype)
 
         with prof("moe_gemm"):
-            # Batched bmm path: expand tokens to (T*K) rows, one bmm chain for
-            # all activated experts instead of a per-expert python loop.
             pos = torch.searchsorted(uniq, local_ids)
             flat_pos = pos.reshape(-1)
             n_rows = flat_pos.shape[0]
             hid = x.shape[-1]
-            inter = w2_dq.shape[-1]
 
-            x_exp = x.reshape(-1, hid)[
-                torch.arange(n_rows, device=x.device) // local_ids.shape[-1]
-            ]
-            if apply_router_weight_on_input:
-                x_exp = x_exp * topk_weights.reshape(-1, 1)
+            if n_rows <= 64:
+                # Decode/small-batch path: bmm 批量链，避免逐 expert python 循环。
+                # （大 batch 下 [T*K, 2I, H] 展开会 OOM，走分组循环。）
+                x_exp = x.reshape(-1, hid)[
+                    torch.arange(n_rows, device=x.device) // local_ids.shape[-1]
+                ]
+                if apply_router_weight_on_input:
+                    x_exp = x_exp * topk_weights.reshape(-1, 1)
 
-            w13_exp = w1_dq[flat_pos.clamp(min=0)]  # [T*K, 2I, H]
-            w2_exp = w2_dq[flat_pos.clamp(min=0)]  # [T*K, H, I]
-            h = torch.bmm(x_exp.unsqueeze(1), w13_exp.transpose(1, 2))
-            a = torch.ops.xspeedgate_ops.clamped_swiglu(
-                h, limit if limit is not None else 1e30
-            )
-            y = torch.bmm(a, w2_exp.transpose(1, 2)).squeeze(1)  # [T*K, H]
-            if not apply_router_weight_on_input:
-                y = y * topk_weights.reshape(-1, 1)
-            # -1 填充项（无效路由）置零，不贡献输出
-            y = y * (local_ids.reshape(-1, 1) >= 0).to(y.dtype)
-            summed = y.view(-1, local_ids.shape[-1], hid).sum(dim=1)
-            output.copy_(summed.view(output.shape))
+                w13_exp = w1_dq[flat_pos.clamp(min=0)]  # [T*K, 2I, H]
+                w2_exp = w2_dq[flat_pos.clamp(min=0)]  # [T*K, H, I]
+                h = torch.bmm(x_exp.unsqueeze(1), w13_exp.transpose(1, 2))
+                a = torch.ops.xspeedgate_ops.clamped_swiglu(
+                    h, limit if limit is not None else 1e30
+                )
+                y = torch.bmm(a, w2_exp.transpose(1, 2)).squeeze(1)  # [T*K, H]
+                if not apply_router_weight_on_input:
+                    y = y * topk_weights.reshape(-1, 1)
+                # -1 填充项（无效路由）置零，不贡献输出
+                y = y * (local_ids.reshape(-1, 1) >= 0).to(y.dtype)
+                summed = y.view(-1, local_ids.shape[-1], hid).sum(dim=1)
+                output.copy_(summed.view(output.shape))
+            else:
+                result = torch.zeros_like(output)
+                for e_sel, e in enumerate(uniq.tolist()):
+                    mask = local_ids == e
+                    tok_idx, slot_idx = mask.nonzero(as_tuple=True)
+                    xe = x[tok_idx]
+                    h = xe @ w1_dq[e_sel].T
+                    gate, up = h.chunk(2, dim=-1)
+                    if limit is not None:
+                        gate = gate.clamp(max=limit)
+                        up = up.clamp(min=-limit, max=limit)
+                    ye = (F.silu(gate) * up) @ w2_dq[e_sel].T
+                    if not apply_router_weight_on_input:
+                        ye = ye * topk_weights[tok_idx, slot_idx].unsqueeze(-1)
+                    result.index_add_(0, tok_idx, ye)
+                output.copy_(result)
