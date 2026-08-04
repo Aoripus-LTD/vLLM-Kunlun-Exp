@@ -934,27 +934,32 @@ class DeepseekV4DecoderLayer(nn.Module):
     ) -> tuple[
         torch.Tensor, torch.Tensor | None, torch.Tensor | None, torch.Tensor | None
     ]:
+        from vllm_kunlun.models.deepseek_v4.prof import prof
+
         if residual is None:
             # First layer: run standalone hc_pre
             residual = x
-            x, post_mix, res_mix = self.hc_pre(
-                x, self.hc_attn_fn, self.hc_attn_scale, self.hc_attn_base
-            )
+            with prof("mhc"):
+                residual = x
+                x, post_mix, res_mix = self.hc_pre(
+                    x, self.hc_attn_fn, self.hc_attn_scale, self.hc_attn_base
+                )
         else:
-            residual, post_mix, res_mix, x = self.mhc_fused_post_pre(
-                x,
-                residual,
-                post_mix,
-                res_mix,
-                self.hc_attn_fn,
-                self.hc_attn_scale,
-                self.hc_attn_base,
-                self.rms_norm_eps,
-                self.hc_eps,
-                self.hc_eps,
-                self.hc_post_alpha,
-                self.hc_sinkhorn_iters,
-            )
+            with prof("mhc"):
+                residual, post_mix, res_mix, x = self.mhc_fused_post_pre(
+                    x,
+                    residual,
+                    post_mix,
+                    res_mix,
+                    self.hc_attn_fn,
+                    self.hc_attn_scale,
+                    self.hc_attn_base,
+                    self.rms_norm_eps,
+                    self.hc_eps,
+                    self.hc_eps,
+                    self.hc_post_alpha,
+                    self.hc_sinkhorn_iters,
+                )
 
         x = self.attn_norm(x)
         # Component-level debug dump (uncommitted): DSV4_COMP_DIR gates saving
@@ -978,29 +983,32 @@ class DeepseekV4DecoderLayer(nn.Module):
                 x.detach().float().cpu(),
                 os.path.join(_comp_dir, f"vllm_layer{self._layer_index}_attn_in.pt"),
             )
-        x = self.attn(positions, x, None)
+        with prof("attn"):
+            x = self.attn(positions, x, None)
         if _dump_comp:
             torch.save(
                 x.detach().float().cpu(),
                 os.path.join(_comp_dir, f"vllm_layer{self._layer_index}_attn_out.pt"),
             )
 
-        residual, post_mix, res_mix, x = self.mhc_fused_post_pre(
-            x,
-            residual,
-            post_mix,
-            res_mix,
-            self.hc_ffn_fn,
-            self.hc_ffn_scale,
-            self.hc_ffn_base,
-            self.rms_norm_eps,
-            self.hc_eps,
-            self.hc_eps,
-            self.hc_post_alpha,
-            self.hc_sinkhorn_iters,
-        )
+        with prof("mhc"):
+            residual, post_mix, res_mix, x = self.mhc_fused_post_pre(
+                x,
+                residual,
+                post_mix,
+                res_mix,
+                self.hc_ffn_fn,
+                self.hc_ffn_scale,
+                self.hc_ffn_base,
+                self.rms_norm_eps,
+                self.hc_eps,
+                self.hc_eps,
+                self.hc_post_alpha,
+                self.hc_sinkhorn_iters,
+            )
         x = self.ffn_norm(x)
-        x = self.ffn(x, input_ids)
+        with prof("ffn"):
+            x = self.ffn(x, input_ids)
         if _dump_comp:
             torch.save(
                 x.detach().float().cpu(),
@@ -1204,6 +1212,10 @@ class DeepseekV4Model(nn.Module):
         # fused_post_pre. After the last layer we must apply it explicitly.
         if layer is not None:
             hidden_states = layer.hc_post(hidden_states, residual, post_mix, res_mix)
+
+        from vllm_kunlun.models.deepseek_v4.prof import step as _prof_step
+
+        _prof_step()
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({"hidden_states": hidden_states})

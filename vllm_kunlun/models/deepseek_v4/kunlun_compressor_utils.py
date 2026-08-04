@@ -30,13 +30,18 @@ def get_compressed_slot_mapping(
             (num_tokens,), -1, dtype=torch.int64, device=query_start_loc.device
         )
 
+    # Batch-fetch per-request scalars once (every .item() on Kunlun is a full
+    # device sync; this runs for every sparse layer's metadata each step).
+    qsl_cpu = query_start_loc.cpu()
+    seq_lens_cpu = seq_lens.cpu()
+
     for b in range(block_table.shape[0]):
-        qs = int(query_start_loc[b].item())
-        qe = int(query_start_loc[b + 1].item())
+        qs = int(qsl_cpu[b])
+        qe = int(qsl_cpu[b + 1])
         qlen = qe - qs
         if qlen <= 0:
             continue
-        start_pos = int(seq_lens[b].item()) - qlen
+        start_pos = int(seq_lens_cpu[b]) - qlen
         i = torch.arange(qlen, device=block_table.device)
         pos = start_pos + i
         valid = (pos + 1) % compress_ratio == 0

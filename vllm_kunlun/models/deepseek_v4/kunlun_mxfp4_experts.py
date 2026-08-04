@@ -110,22 +110,26 @@ class KunlunEmulatedMxfp4Experts(OCP_MXQuantizationEmulationTritonExperts):
         # per layer per step — the dominant decode cost), while a decode step
         # activates at most top-k (6) of them.
         uniq = torch.unique(local_ids[local_ids >= 0])
-        w1_dq = dequant_mxfp4_torch(w1[uniq], self.w1_scale_val[uniq], x.dtype)
-        w2_dq = dequant_mxfp4_torch(w2[uniq], self.w2_scale_val[uniq], x.dtype)
+        from vllm_kunlun.models.deepseek_v4.prof import prof
+
+        with prof("moe_dequant"):
+            w1_dq = dequant_mxfp4_torch(w1[uniq], self.w1_scale_val[uniq], x.dtype)
+            w2_dq = dequant_mxfp4_torch(w2[uniq], self.w2_scale_val[uniq], x.dtype)
 
         result = torch.zeros_like(output)
-        for e_sel, e in enumerate(uniq.tolist()):
-            mask = local_ids == e
-            tok_idx, slot_idx = mask.nonzero(as_tuple=True)
-            xe = x[tok_idx]
-            h = xe @ w1_dq[e_sel].T
-            gate, up = h.chunk(2, dim=-1)
-            if limit is not None:
-                gate = gate.clamp(max=limit)
-                up = up.clamp(min=-limit, max=limit)
-            ye = (F.silu(gate) * up) @ w2_dq[e_sel].T
-            if not apply_router_weight_on_input:
-                ye = ye * topk_weights[tok_idx, slot_idx].unsqueeze(-1)
-            result.index_add_(0, tok_idx, ye)
+        with prof("moe_gemm"):
+            for e_sel, e in enumerate(uniq.tolist()):
+                mask = local_ids == e
+                tok_idx, slot_idx = mask.nonzero(as_tuple=True)
+                xe = x[tok_idx]
+                h = xe @ w1_dq[e_sel].T
+                gate, up = h.chunk(2, dim=-1)
+                if limit is not None:
+                    gate = gate.clamp(max=limit)
+                    up = up.clamp(min=-limit, max=limit)
+                ye = (F.silu(gate) * up) @ w2_dq[e_sel].T
+                if not apply_router_weight_on_input:
+                    ye = ye * topk_weights[tok_idx, slot_idx].unsqueeze(-1)
+                result.index_add_(0, tok_idx, ye)
 
         output.copy_(result)

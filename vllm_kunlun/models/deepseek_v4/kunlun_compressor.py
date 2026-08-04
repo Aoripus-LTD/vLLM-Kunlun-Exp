@@ -57,17 +57,25 @@ def compress_norm_rope_store_512_torch(
     head_ar = torch.arange(HEAD, device=device)
     w_f32 = rms_norm_weight.float()
 
+    # Batch-fetch the per-token scalars once (each .item() on Kunlun is a
+    # full device sync + DtoH copy; 4 per token per layer was seconds per
+    # decode step in aggregate).
+    slot_cpu = slot_mapping[:num_actual].cpu()
+    pos_cpu = positions[:num_actual].cpu()
+    kv_slot_cpu = kv_slot_mapping[:num_actual].cpu()
+    req_cpu = token_to_req_indices[:num_actual].cpu()
+
     for t in range(num_actual):
-        slot_id = int(slot_mapping[t].item())
+        slot_id = int(slot_cpu[t])
         if slot_id < 0:
             continue
-        position = int(positions[t].item())
+        position = int(pos_cpu[t])
         if (position + 1) % compress_ratio != 0:
             continue
-        kv_slot = int(kv_slot_mapping[t].item())
+        kv_slot = int(kv_slot_cpu[t])
         if kv_slot < 0:
             continue
-        req = int(token_to_req_indices[t].item())
+        req = int(req_cpu[t])
 
         n_tok = (1 + ov) * compress_ratio
         start = position - n_tok + 1
@@ -162,17 +170,23 @@ def compress_norm_rope_store_128_torch(
     head_ar = torch.arange(HEAD128, device=device)
     w_f32 = rms_norm_weight.float()
 
+    # Batch-fetch per-token scalars once (see the 512 path note).
+    slot_cpu = slot_mapping[:num_actual].cpu()
+    pos_cpu = positions[:num_actual].cpu()
+    kv_slot_cpu = kv_slot_mapping[:num_actual].cpu()
+    req_cpu = token_to_req_indices[:num_actual].cpu()
+
     for t in range(num_actual):
-        slot_id = int(slot_mapping[t].item())
+        slot_id = int(slot_cpu[t])
         if slot_id < 0:
             continue
-        position = int(positions[t].item())
+        position = int(pos_cpu[t])
         if (position + 1) % compress_ratio != 0:
             continue
-        kv_slot = int(kv_slot_mapping[t].item())
+        kv_slot = int(kv_slot_cpu[t])
         if kv_slot < 0:
             continue
-        req = int(token_to_req_indices[t].item())
+        req = int(req_cpu[t])
 
         n_tok = (1 + ov) * compress_ratio
         start = position - n_tok + 1

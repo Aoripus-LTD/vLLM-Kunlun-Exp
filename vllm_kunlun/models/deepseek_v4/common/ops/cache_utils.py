@@ -445,9 +445,11 @@ def dequantize_and_gather_k_cache(
     # at position ``seq_len - 1`` into out[b, offset : offset + gather_len].
     num_reqs = seq_lens.shape[0]
     device = out.device
+    seq_lens_cpu = seq_lens.cpu()
+    gather_lens_cpu = gather_lens.cpu() if gather_lens is not None else None
     for b in range(num_reqs):
-        seq_len = int(seq_lens[b].item())
-        gather_len = seq_len if gather_lens is None else int(gather_lens[b].item())
+        seq_len = int(seq_lens_cpu[b])
+        gather_len = seq_len if gather_lens_cpu is None else int(gather_lens_cpu[b])
         if gather_len <= 0:
             continue
         start_pos = seq_len - gather_len
@@ -585,15 +587,18 @@ def combine_topk_swa_indices(
     #   combined[t, topk_len+i]           = M*b + N + i + pos - swa_len + 1
     #                                       - (seq_len - gather_len), i < swa_len
     #   combined_lens[t]                  = topk_len + swa_len
-    base = int(query_start_loc[0].item())
+    qsl_cpu = query_start_loc.cpu()
+    seq_lens_cpu = seq_lens.cpu()
+    gather_lens_cpu = gather_lens.cpu()
+    base = int(qsl_cpu[0])
     for b in range(num_reqs):
-        query_start = int(query_start_loc[b].item()) - base
-        query_end = int(query_start_loc[b + 1].item()) - base
+        query_start = int(qsl_cpu[b]) - base
+        query_end = int(qsl_cpu[b + 1]) - base
         query_len = query_end - query_start
         if query_len <= 0:
             continue
-        seq_len = int(seq_lens[b].item())
-        gather_len = int(gather_lens[b].item())
+        seq_len = int(seq_lens_cpu[b])
+        gather_len = int(gather_lens_cpu[b])
         start_pos = seq_len - query_len
         gather_start = seq_len - gather_len
         i = torch.arange(query_len, device=topk_indices.device)
@@ -603,10 +608,15 @@ def combine_topk_swa_indices(
             torch.full_like(pos, topk),
         )
         swa_len = torch.minimum(pos + 1, torch.full_like(pos, window_size))
+        # Batch-fetch the per-token ints once (every .item() on Kunlun is a
+        # full device sync; the old per-token loop did 3 syncs per token).
+        topk_len_cpu = topk_len.cpu()
+        swa_len_cpu = swa_len.cpu()
+        pos_cpu = pos.cpu()
         for j, t in enumerate(range(query_start, query_end)):
-            tl_ = int(topk_len[j].item())
-            sl_ = int(swa_len[j].item())
-            p = int(pos[j].item())
+            tl_ = int(topk_len_cpu[j])
+            sl_ = int(swa_len_cpu[j])
+            p = int(pos_cpu[j])
             if tl_ > 0:
                 combined_indices[t, :tl_] = (
                     topk_indices[t, :tl_].to(torch.int64) + M * b

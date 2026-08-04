@@ -190,36 +190,38 @@ def xpu_sparse_decode_fp8(
     from vllm_kunlun.models.deepseek_v4.common.ops.cache_utils import (
         gather_ds_mla_slots_torch,
     )
+    from vllm_kunlun.models.deepseek_v4.prof import prof
 
-    if not swa_only and topk_idx_2d is not None and kv_cache is not None:
-        topk_flat = topk_idx_2d.reshape(-1).long()
-        valid = topk_flat >= 0
-        topk_buf = torch.zeros(
-            (num_tokens * max_topk, OUTPUT_DIM), dtype=torch.float32, device=device
-        )
-        if bool(valid.any()):
-            compressed_block_size = kv_cache.shape[1]
-            topk_buf[valid] = gather_ds_mla_slots_torch(
-                kv_cache, compressed_block_size, topk_flat[valid]
+    with prof("attn_gather_dequant"):
+        if not swa_only and topk_idx_2d is not None and kv_cache is not None:
+            topk_flat = topk_idx_2d.reshape(-1).long()
+            valid = topk_flat >= 0
+            topk_buf = torch.zeros(
+                (num_tokens * max_topk, OUTPUT_DIM), dtype=torch.float32, device=device
             )
-        ws_3d[:, :max_topk, :] = topk_buf.view(num_tokens, max_topk, OUTPUT_DIM).to(
+            if bool(valid.any()):
+                compressed_block_size = kv_cache.shape[1]
+                topk_buf[valid] = gather_ds_mla_slots_torch(
+                    kv_cache, compressed_block_size, topk_flat[valid]
+                )
+            ws_3d[:, :max_topk, :] = topk_buf.view(num_tokens, max_topk, OUTPUT_DIM).to(
+                torch.bfloat16
+            )
+
+        # Dequant+gather SWA slots
+        swa_flat = swa_idx_2d.reshape(-1).long()
+        valid_s = swa_flat >= 0
+        swa_buf = torch.zeros(
+            (num_tokens * max_swa, OUTPUT_DIM), dtype=torch.float32, device=device
+        )
+        if bool(valid_s.any()):
+            swa_block_size = swa_kv_cache.shape[1]
+            swa_buf[valid_s] = gather_ds_mla_slots_torch(
+                swa_kv_cache, swa_block_size, swa_flat[valid_s]
+            )
+        ws_3d[:, max_topk:, :] = swa_buf.view(num_tokens, max_swa, OUTPUT_DIM).to(
             torch.bfloat16
         )
-
-    # Dequant+gather SWA slots
-    swa_flat = swa_idx_2d.reshape(-1).long()
-    valid_s = swa_flat >= 0
-    swa_buf = torch.zeros(
-        (num_tokens * max_swa, OUTPUT_DIM), dtype=torch.float32, device=device
-    )
-    if bool(valid_s.any()):
-        swa_block_size = swa_kv_cache.shape[1]
-        swa_buf[valid_s] = gather_ds_mla_slots_torch(
-            swa_kv_cache, swa_block_size, swa_flat[valid_s]
-        )
-    ws_3d[:, max_topk:, :] = swa_buf.view(num_tokens, max_swa, OUTPUT_DIM).to(
-        torch.bfloat16
-    )
 
     # Build combined indices into the flat workspace and combined lengths.
     # Workspace layout per token t: [topk_0..topk_{max_topk-1}, swa_0..swa_{max_swa-1}]
@@ -233,7 +235,10 @@ def xpu_sparse_decode_fp8(
     else:
         combined_lens = swa_lens.to(torch.int32)
 
-    max_combined = int(combined_lens.max().item()) if combined_lens.numel() > 0 else 0
+    # Batch-fetch python scalars once (every .item() on Kunlun is a full
+    # device sync; per-token loops of them cost seconds per decode step).
+    combined_lens_cpu = combined_lens.cpu()
+    max_combined = int(combined_lens_cpu.max()) if combined_lens_cpu.numel() > 0 else 0
     # Round up to BLOCK_N=16 alignment for kernel efficiency
     _BLOCK_N = 16
     max_combined_padded = ((max_combined + _BLOCK_N - 1) // _BLOCK_N) * _BLOCK_N
@@ -255,7 +260,7 @@ def xpu_sparse_decode_fp8(
 
     if not swa_only and topk_lens is not None:
         # Pack topk: for each token, write t*K_total + 0..tlen-1 at positions 0..tlen-1
-        max_tlen = int(topk_lens.max().item())
+        max_tlen = int(topk_lens.cpu().max())
         topk_range = torch.arange(max_tlen, device=device, dtype=torch.int32).unsqueeze(
             0
         )
@@ -266,16 +271,20 @@ def xpu_sparse_decode_fp8(
             topk_ws_indices,
             torch.tensor(-1, dtype=torch.int32, device=device),
         )
-        # Pack swa after topk: positions tlen..tlen+slen-1
-        # Since tlen varies per token, we need per-token offset
+        # Pack swa after topk at per-token positions topk_lens[t] + swa_pos,
+        # fully vectorized (replaces the per-token loop with its 2 syncs/token).
         swa_range = torch.arange(max_swa, device=device, dtype=torch.int32).unsqueeze(0)
         swa_valid = swa_range < swa_lens.unsqueeze(1)
         swa_ws_indices = token_offsets.unsqueeze(1) + max_topk + swa_range
-        # Write at position topk_lens[t] + swa_pos for each token
-        for t_idx in range(num_tokens):
-            tlen = int(topk_lens[t_idx].item())
-            slen = int(swa_lens[t_idx].item())
-            combined_indices[t_idx, tlen : tlen + slen] = swa_ws_indices[t_idx, :slen]
+        target_pos = topk_lens.unsqueeze(1).to(torch.int32) + swa_range  # [B, max_swa]
+        batch_idx = (
+            torch.arange(num_tokens, device=device, dtype=torch.int32)
+            .unsqueeze(1)
+            .expand_as(target_pos)
+        )
+        combined_indices[batch_idx[swa_valid], target_pos[swa_valid].long()] = (
+            swa_ws_indices[swa_valid]
+        )
     else:
         # SWA-only: pack swa indices at positions 0..slen-1
         # Use min(max_swa, max_combined_padded) because combined_indices only
@@ -295,13 +304,14 @@ def xpu_sparse_decode_fp8(
     # Kunlun: triton_bf16_mla_sparse_interface cannot run here; per-token
     # torch sparse attention with attn_sink appended to the softmax.
     sink = attn_sink.float()
-    for t in range(num_tokens):
-        idx = combined_indices[t]
-        idx = idx[idx >= 0]
-        if idx.numel() == 0:
-            continue
-        k = workspace[idx.long()].float()  # [n, 512] gathered bf16 rows
-        s = (q[t].float() @ k.T) * softmax_scale  # [H, n]
-        s = torch.cat([s, sink.unsqueeze(1)], dim=-1)  # [H, n+1]
-        p = torch.softmax(s, dim=-1)
-        out[t] = (p[:, : idx.numel()] @ k).to(out.dtype)
+    with prof("attn_core"):
+        for t in range(num_tokens):
+            idx = combined_indices[t]
+            idx = idx[idx >= 0]
+            if idx.numel() == 0:
+                continue
+            k = workspace[idx.long()].float()  # [n, 512] gathered bf16 rows
+            s = (q[t].float() @ k.T) * softmax_scale  # [H, n]
+            s = torch.cat([s, sink.unsqueeze(1)], dim=-1)  # [H, n+1]
+            p = torch.softmax(s, dim=-1)
+            out[t] = (p[:, : idx.numel()] @ k).to(out.dtype)
