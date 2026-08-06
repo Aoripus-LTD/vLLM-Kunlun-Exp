@@ -186,6 +186,7 @@ _register_post_import_hook(
     "vllm.model_executor.layers.activation", _activation_applied, _activation_apply
 )
 
+
 # --- hook 6: select_int8_moe_backend in w8a8_int8 module ---------------
 # CompressedTensorsW8A8Int8MoEMethod.__init__ calls select_int8_moe_backend()
 # which only supports Triton/CUDA backends. On Kunlun XPU is_cuda()==False so
