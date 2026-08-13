@@ -33,6 +33,11 @@ def _configure_kunlun_logger() -> logging.Logger:
 # run per real import event.
 _POST_IMPORT_DISPATCH_IN_PROGRESS = {"v": False}
 
+# Platform discovery can call the plugin more than once in the same process,
+# including re-entrantly while the first call is importing vLLM modules.
+_REGISTER_STATE = "idle"
+_KUNLUN_PLATFORM = "vllm_kunlun.platforms.kunlun.KunlunPlatform"
+
 
 _MODULE_MAPPINGS = {
     "vllm.compilation.wrapper": "vllm_kunlun.compilation.wrapper",
@@ -236,6 +241,31 @@ _register_post_import_hook(
 )
 
 
+# OOT layer modules import ``vllm.model_executor.custom_op``. Loading them
+# from register() is too early: during platform discovery that module can
+# still be importing vllm.config, causing a circular import through
+# vllm.utils.torch_utils. Wait until custom_op has finished importing.
+def _oot_registrations_applied(mod):
+    # The import hook also runs for nested imports while custom_op.py is still
+    # being initialized. The module can already be present in sys.modules at
+    # that point, but its registries/classes are not usable yet.
+    if not hasattr(mod, "CustomOp") or not hasattr(mod, "PluggableLayer"):
+        return True
+    ops_module = sys.modules.get("vllm_kunlun.ops")
+    return bool(getattr(ops_module, "_KUNLUN_OOT_REGISTRATIONS_LOADED", False))
+
+
+def _oot_registrations_apply(mod):
+    import vllm_kunlun.ops  # noqa: F401
+
+
+_register_post_import_hook(
+    "vllm.model_executor.custom_op",
+    _oot_registrations_applied,
+    _oot_registrations_apply,
+)
+
+
 # --- hook 6: select_int8_moe_backend in w8a8_int8 module ---------------
 # CompressedTensorsW8A8Int8MoEMethod.__init__ calls select_int8_moe_backend()
 # which only supports Triton/CUDA backends. On Kunlun XPU is_cuda()==False so
@@ -361,6 +391,14 @@ def import_hook():
 def register():
     """Register the Kunlun platform"""
 
+    global _REGISTER_STATE
+    if _REGISTER_STATE != "idle":
+        logging.getLogger("vllm_kunlun").debug(
+            "[KunlunPlugin] register() skipped; state=%s", _REGISTER_STATE
+        )
+        return _KUNLUN_PLATFORM
+    _REGISTER_STATE = "registering"
+
     logger = _configure_kunlun_logger()
     logger.info("[KunlunPlugin] register() pid=%s", os.getpid())
 
@@ -405,14 +443,44 @@ def register():
         )
         _private = "_vllm_kunlun_custom_ops_registration"
         if _private not in sys.modules:
-            _spec = _ilu.spec_from_file_location(_private, _ops_file)
-            _mod = _ilu.module_from_spec(_spec)
-            sys.modules[_private] = _mod
-            _spec.loader.exec_module(_mod)
+            _canonical = "vllm_kunlun.ops._custom_ops"
+            _mod = sys.modules.get(_canonical)
+            if _mod is not None:
+                # ``import vllm_kunlun.ops`` may have loaded the canonical
+                # module already. Reuse it instead of registering schemas a
+                # second time under the private bootstrap name.
+                sys.modules[_private] = _mod
+            else:
+                _spec = _ilu.spec_from_file_location(_private, _ops_file)
+                _mod = _ilu.module_from_spec(_spec)
+                sys.modules[_private] = _mod
+                _spec.loader.exec_module(_mod)
         logger.info("[KunlunPlugin] vllm_kunlun custom ops registered")
     except Exception:
         logger.exception("[KunlunPlugin] custom ops registration failed")
         raise
+
+    # Speculative-decoding compatibility modules patch vLLM proposer behavior
+    # and are intentionally kept outside the operator registration package.
+    # Their upstream dependencies vary across vLLM versions, so an unavailable
+    # module does not prevent the Kunlun platform from loading.
+    for _spec_decode_module in (
+        "vllm_kunlun.v1.sample.spec_decode.dflash",
+        "vllm_kunlun.v1.sample.spec_decode.eagle",
+    ):
+        try:
+            importlib.import_module(_spec_decode_module)
+            logger.info(
+                "[KunlunPlugin] loaded speculative-decoding compatibility: %s",
+                _spec_decode_module,
+            )
+        except ImportError as _e:
+            logger.debug(
+                "[KunlunPlugin] speculative-decoding compatibility unavailable: "
+                "%s: %s",
+                _spec_decode_module,
+                _e,
+            )
 
     # --- load native extension to register torch.ops._C.weak_ref_tensor ---
     try:
@@ -435,6 +503,9 @@ def register():
     # --- import hook ---
     try:
         import_hook()
+        # If custom_op was imported before the plugin hook was installed,
+        # dispatch its pending post-import hooks immediately.
+        _dispatch_post_import_hooks()
         logger.info("[KunlunPlugin] import_hook() ok")
     except Exception:
         logger.exception("[KunlunPlugin] import_hook() failed")
@@ -488,8 +559,9 @@ def register():
         logger.exception("[KunlunPlugin] Qwen3ReasoningParser registration failed")
         # Non-fatal: continue without the override
 
+    _REGISTER_STATE = "registered"
     logger.info("[KunlunPlugin] register() done")
-    return "vllm_kunlun.platforms.kunlun.KunlunPlatform"
+    return _KUNLUN_PLATFORM
 
 
 def register_model():

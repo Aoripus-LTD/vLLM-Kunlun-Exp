@@ -18,6 +18,7 @@ from vllm.model_executor.layers.fused_moe.layer import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
+    QKVParallelLinear,
     RowParallelLinear,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -45,7 +46,6 @@ from vllm.sequence import IntermediateTensors
 
 from vllm_kunlun.ops.activation import SiluAndMul
 from vllm_kunlun.ops.attention.layer import Attention
-from vllm_kunlun.ops.linear import QKVParallelLinear
 
 logger = init_logger(__name__)
 
