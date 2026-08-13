@@ -1,0 +1,66 @@
+# Virtualenv
+/.venv/
+/venv/
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+
+# C extensions
+*.so
+
+# Distribution / packaging
+/bin/
+/build/
+/develop-eggs/
+/dist/
+/eggs/
+/lib/
+/lib64/
+/output/
+/parts/
+/sdist/
+/var/
+/*.egg-info/
+/.installed.cfg
+/*.egg
+/.eggs
+
+# AUTHORS and ChangeLog will be generated while packaging
+/AUTHORS
+/ChangeLog
+
+# BCloud / BuildSubmitter
+/build_submitter.*
+/logger_client_log
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage reports
+.tox/
+.coverage
+.cache
+.pytest_cache
+nosetests.xml
+coverage.xml
+
+# Translations
+*.mo
+
+# Sphinx documentation
+/docs/_build/
+
+# VSCode
+.vscode/
+
+# DS Store
+.DS_Store
+
+# PyCharm
+#  JetBrains specific template is maintained in a separate JetBrains.gitignore that can
+#  be found at https://github.com/github/gitignore/blob/main/Global/JetBrains.gitignore
+#  and can be added to the global gitignore or merged into this file.  For a more nuclear
+#  option (not recommended) you can uncomment the following to ignore the entire idea folder.
+.idea/

@@ -1,0 +1,78 @@
+# Graph Mode Guide
+
+This guide provides instructions for using Kunlun Graph Mode with vLLM Kunlun. Please note that graph mode is available both on V1 and V0 Engine. All supported models are highly compatible with Kunlun Graph.
+
+## Getting Started
+
+From vLLM-KunLun-0.10.1.1 with V1 Engine, vLLM Kunlun will run models in graph mode by default to keep the same behavior with vLLM. If you hit any issues, please feel free to open an issue on GitHub and fallback to the eager mode temporarily by setting `enforce_eager=True` when initializing the model.
+
+There is a graph mode supported by vLLM Kunlun:
+
+- **KunlunGraph**: This is the default graph mode supported by vLLM Kunlun. In vLLM-KunLun-0.10.1.1, Qwen, GLM and InternVL series models are well tested.
+
+## Using KunlunGraph
+
+KunlunGraph is enabled by default. Take Qwen series models as an example, just set to use V1 Engine(default) is enough.
+
+Offline example:
+
+```python
+import os
+
+from vllm import LLM
+
+model = LLM(model="models/Qwen3-8B-Instruct")
+outputs = model.generate("Hello, how are you?")
+```
+
+Online example:
+
+```shell
+vllm serve Qwen3-8B-Instruct
+```
+
+## Advanced KunlunGraph Configuration
+
+Below is a more detailed online example with additional configuration options.
+
+Online example:
+
+```shell
+python -m vllm.entrypoints.openai.api_server \
+      --host 0.0.0.0 \
+      --port 8000 \
+      --model /models/Qwen3-8B\
+      --gpu-memory-utilization 0.9 \
+      --trust-remote-code \
+      --max-model-len 32768 \
+      --tensor-parallel-size 1 \
+      --dtype float16 \
+      --no-enable-prefix-caching \
+      --no-enable-chunked-prefill \
+      --distributed-executor-backend mp \
+      --served-model-name Qwen3-8B-Instruct
+
+```
+
+## Fallback to the Eager Mode
+
+If `KunlunGraph` fail to run, you should fallback to the eager mode.
+
+Online example:
+
+```shell
+python -m vllm.entrypoints.openai.api_server \
+      --host 0.0.0.0 \
+      --port 8000 \
+      --model /models/Qwen3-8B-Instruct\
+      --gpu-memory-utilization 0.9 \
+      --trust-remote-code \
+      --max-model-len 32768 \
+      --tensor-parallel-size 1 \
+      --dtype float16 \
+      --no-enable-prefix-caching \
+      --no-enable-chunked-prefill \
+      --distributed-executor-backend mp \
+      --served-model-name Qwen3-8B-Instruct \
+      --enforce_eager
+```
