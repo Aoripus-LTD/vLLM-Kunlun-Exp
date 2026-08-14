@@ -62,9 +62,7 @@ def compute_swa_indices_and_lens(
     slots = block_numbers * block_size + pos_off % block_size
     valid_off = (offs.unsqueeze(0) < swa_len.unsqueeze(1)) & valid.unsqueeze(1)
     swa_indices.copy_(
-        torch.where(
-            valid_off, slots.to(swa_indices.dtype), torch.full_like(slots, -1)
-        )
+        torch.where(valid_off, slots.to(swa_indices.dtype), torch.full_like(slots, -1))
     )
     swa_lens.copy_(
         torch.where(valid, swa_len.to(swa_lens.dtype), torch.zeros_like(swa_len))
@@ -196,7 +194,9 @@ def compute_prefill_gather_lens(
     qe = query_start_loc[num_decodes + 1 : num_decodes + num_prefills + 1]
     qlen = qe - qs
     prefix = sl - qlen
-    pfx_gather_lens.copy_(qlen + torch.minimum(prefix, torch.full_like(prefix, window_size - 1)))
+    pfx_gather_lens.copy_(
+        qlen + torch.minimum(prefix, torch.full_like(prefix, window_size - 1))
+    )
 
 
 class _TorchFn:
