@@ -306,6 +306,21 @@ class DeepseekCompressor(nn.Module):
             fc._kunlun_cpu_meta = cpu_meta
         pos_cpu, reqs_cpu = cpu_meta
 
+        from vllm_kunlun.models.deepseek_v4.prof import prof
+
+        # Determine whether this forward can use the native ring path (pure
+        # decode). In that path the ring is backfilled once from the
+        # prefill-written state_cache and then maintained in-place by
+        # compress_forward_fast, so the paged state_cache is never read during
+        # decode. Skip the save_partial_states scatter in that case — it is the
+        # compressor hot spot (torch advanced-indexing scatter).
+        will_use_native = False
+        if self.head_dim == 512 and self.overlap:
+            counts = torch.bincount(
+                reqs_cpu.long(), minlength=max(1, int(reqs_cpu.max().item()) + 1)
+            )
+            will_use_native = bool((counts[reqs_cpu.long()] == 1).all().item())
+
         # [num_blocks, block_size, kv_dim+score_dim], where kv_dim == score_dim
         state_cache = self.state_cache.kv_cache
         # kv_state stored in first half, score_state stored in second half
@@ -322,21 +337,20 @@ class DeepseekCompressor(nn.Module):
         # GEMM; state_cache from this kernel) but neither emits/waits on PDL
         # grid dependency primitives, so launch_pdl=True caused a
         # read-after-write race and non-deterministic output.
-        from vllm_kunlun.models.deepseek_v4.prof import prof
-
-        with prof("comp_save_states"):
-            save_partial_states(
-                kv=kv,
-                score=score,
-                ape=self.ape,
-                positions=positions,
-                state_cache=state_cache,
-                slot_mapping=slot_mapping,
-                block_size=block_size,
-                state_width=state_width,
-                compress_ratio=self.compress_ratio,
-                pdl_kwargs=pdl_kwargs,
-            )
+        if not will_use_native:
+            with prof("comp_save_states"):
+                save_partial_states(
+                    kv=kv,
+                    score=score,
+                    ape=self.ape,
+                    positions=positions,
+                    state_cache=state_cache,
+                    slot_mapping=slot_mapping,
+                    block_size=block_size,
+                    state_width=state_width,
+                    compress_ratio=self.compress_ratio,
+                    pdl_kwargs=pdl_kwargs,
+                )
 
         # Fused: compress → RMSNorm → RoPE → FP8 quant → KV cache write.
         # RoPE requirements (kernel applies forward GPT-J style rotation):
@@ -392,12 +406,7 @@ class DeepseekCompressor(nn.Module):
             # Only when every request in this forward contributes exactly one
             # token (pure decode); prefill/mixed batches keep the torch path
             # so the paged state cache stays the single source for backfill.
-            if self.overlap:
-                counts = torch.bincount(
-                    reqs_cpu.long(), minlength=max(1, int(reqs_cpu.max().item()) + 1)
-                )
-                is_pure_decode = bool((counts[reqs_cpu.long()] == 1).all().item())
-                if is_pure_decode:
+            if will_use_native:
                     from vllm_kunlun.models.deepseek_v4.kunlun_compressor_native import (
                         NativeC4Ring,
                         build_ape_op,
