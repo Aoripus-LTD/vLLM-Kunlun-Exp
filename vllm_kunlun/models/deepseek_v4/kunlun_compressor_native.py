@@ -36,7 +36,9 @@ class NativeC4Ring:
         )
         self.ready = torch.zeros(max_reqs, dtype=torch.bool, device="cpu")
 
-    def backfill(self, req: int, seq_len: int, state_cache, block_table_row, block_size: int):
+    def backfill(
+        self, req: int, seq_len: int, state_cache, block_table_row, block_size: int
+    ):
         """把分页 state_cache 中最近 ≤8 个 token 的状态行搬进 ring[req]。"""
         start = max(0, seq_len - self.ring_size)
         positions = torch.arange(start, seq_len, device=state_cache.device)
@@ -51,7 +53,10 @@ def build_ape_op(ape: torch.Tensor, compress_ratio: int, head_dim: int) -> torch
     ring_size = 2 * compress_ratio
     ape_op = torch.zeros(ring_size, head_dim, dtype=torch.float32, device=ape.device)
     for s in range(ring_size):
-        ape_op[s] = ape[s % compress_ratio, (s // compress_ratio) * head_dim : (s // compress_ratio + 1) * head_dim]
+        ape_op[s] = ape[
+            s % compress_ratio,
+            (s // compress_ratio) * head_dim : (s // compress_ratio + 1) * head_dim,
+        ]
     return ape_op
 
 
