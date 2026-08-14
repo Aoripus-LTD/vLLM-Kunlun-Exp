@@ -36,7 +36,9 @@ class NativeC4Ring:
         )
         self.ready = torch.zeros(max_reqs, dtype=torch.bool, device="cpu")
 
-    def backfill(self, req: int, seq_len: int, state_cache, block_table_row, block_size: int):
+    def backfill(
+        self, req: int, seq_len: int, state_cache, block_table_row, block_size: int
+    ):
         """把分页 state_cache 中最近 ≤8 个 token 的状态行搬进 ring[req]。"""
         start = max(0, seq_len - self.ring_size)
         positions = torch.arange(start, seq_len, device=state_cache.device)
@@ -51,7 +53,10 @@ def build_ape_op(ape: torch.Tensor, compress_ratio: int, head_dim: int) -> torch
     ring_size = 2 * compress_ratio
     ape_op = torch.zeros(ring_size, head_dim, dtype=torch.float32, device=ape.device)
     for s in range(ring_size):
-        ape_op[s] = ape[s % compress_ratio, (s // compress_ratio) * head_dim : (s // compress_ratio + 1) * head_dim]
+        ape_op[s] = ape[
+            s % compress_ratio,
+            (s // compress_ratio) * head_dim : (s // compress_ratio + 1) * head_dim,
+        ]
     return ape_op
 
 
@@ -132,35 +137,39 @@ def compress_decode_native_c4(
     compress_ratio: int,
 ) -> None:
     """C4 decode：compress_forward_fast + 后处理（norm/rope/quant/store）。"""
+    from vllm_kunlun.models.deepseek_v4.prof import prof
+
     num_tokens = kv_score.shape[0]
     out_native = torch.zeros(
         num_tokens, ring_state.head_dim, dtype=torch.float32, device=kv_score.device
     )
     reqs_xpu = reqs_cpu.to(kv_score.device).to(torch.int32)
-    torch.ops.xspeedgate_ops.compress_forward_fast(
-        ring_state.ring,
-        kv_score.float(),
-        out_native,
-        ape_op,
-        reqs_xpu,
-        seq_lens.to(torch.int32),
-        None,
-        None,
-    )
+    with prof("comp_forward_fast"):
+        torch.ops.xspeedgate_ops.compress_forward_fast(
+            ring_state.ring,
+            kv_score.float(),
+            out_native,
+            ape_op,
+            reqs_xpu,
+            seq_lens.to(torch.int32),
+            None,
+            None,
+        )
     # 边界 token 后处理
     boundary = ((positions_cpu + 1) % compress_ratio == 0).nonzero().flatten()
     if boundary.numel() == 0:
         return
     kv_slots = kv_slot_mapping[boundary.to(kv_score.device)].long().cpu()
-    post_compress_store_512(
-        out_native[boundary.to(kv_score.device)],
-        positions_cpu[boundary],
-        kv_slots,
-        cos_sin_cache,
-        kv_cache,
-        kv_block_size,
-        rms_norm_weight,
-        rms_norm_eps,
-        rope_head_dim,
-        compress_ratio,
-    )
+    with prof("comp_store"):
+        post_compress_store_512(
+            out_native[boundary.to(kv_score.device)],
+            positions_cpu[boundary],
+            kv_slots,
+            cos_sin_cache,
+            kv_cache,
+            kv_block_size,
+            rms_norm_weight,
+            rms_norm_eps,
+            rope_head_dim,
+            compress_ratio,
+        )

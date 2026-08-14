@@ -4,6 +4,8 @@
 from dataclasses import dataclass
 from typing import Any, ClassVar, cast
 
+import os
+
 import torch
 from torch import nn
 from vllm.config import VllmConfig, get_current_vllm_config
@@ -306,6 +308,21 @@ class DeepseekCompressor(nn.Module):
             fc._kunlun_cpu_meta = cpu_meta
         pos_cpu, reqs_cpu = cpu_meta
 
+        from vllm_kunlun.models.deepseek_v4.prof import prof
+
+        # Determine whether this forward can use the native ring path (pure
+        # decode). In that path the ring is backfilled once from the
+        # prefill-written state_cache and then maintained in-place by
+        # compress_forward_fast, so the paged state_cache is never read during
+        # decode. Skip the save_partial_states scatter in that case — it is the
+        # compressor hot spot (torch advanced-indexing scatter).
+        will_use_native = False
+        if self.head_dim == 512 and self.overlap:
+            counts = torch.bincount(
+                reqs_cpu.long(), minlength=max(1, int(reqs_cpu.max().item()) + 1)
+            )
+            will_use_native = bool((counts[reqs_cpu.long()] == 1).all().item())
+
         # [num_blocks, block_size, kv_dim+score_dim], where kv_dim == score_dim
         state_cache = self.state_cache.kv_cache
         # kv_state stored in first half, score_state stored in second half
@@ -322,18 +339,23 @@ class DeepseekCompressor(nn.Module):
         # GEMM; state_cache from this kernel) but neither emits/waits on PDL
         # grid dependency primitives, so launch_pdl=True caused a
         # read-after-write race and non-deterministic output.
-        save_partial_states(
-            kv=kv,
-            score=score,
-            ape=self.ape,
-            positions=positions,
-            state_cache=state_cache,
-            slot_mapping=slot_mapping,
-            block_size=block_size,
-            state_width=state_width,
-            compress_ratio=self.compress_ratio,
-            pdl_kwargs=pdl_kwargs,
-        )
+        # Skip save_partial_states in the native ring path unless the env var
+        # explicitly re-enables it (correctness A/B: DSV4_SKIP_SAVE_STATES=0).
+        _skip_save_states = os.environ.get("DSV4_SKIP_SAVE_STATES", "1") == "1"
+        if not (will_use_native and _skip_save_states):
+            with prof("comp_save_states"):
+                save_partial_states(
+                    kv=kv,
+                    score=score,
+                    ape=self.ape,
+                    positions=positions,
+                    state_cache=state_cache,
+                    slot_mapping=slot_mapping,
+                    block_size=block_size,
+                    state_width=state_width,
+                    compress_ratio=self.compress_ratio,
+                    pdl_kwargs=pdl_kwargs,
+                )
 
         # Fused: compress → RMSNorm → RoPE → FP8 quant → KV cache write.
         # RoPE requirements (kernel applies forward GPT-J style rotation):
@@ -389,39 +411,35 @@ class DeepseekCompressor(nn.Module):
             # Only when every request in this forward contributes exactly one
             # token (pure decode); prefill/mixed batches keep the torch path
             # so the paged state cache stays the single source for backfill.
-            if self.overlap:
-                counts = torch.bincount(
-                    reqs_cpu.long(), minlength=max(1, int(reqs_cpu.max().item()) + 1)
+            if will_use_native:
+                from vllm_kunlun.models.deepseek_v4.kunlun_compressor_native import (
+                    NativeC4Ring,
+                    build_ape_op,
+                    compress_decode_native_c4,
                 )
-                is_pure_decode = bool((counts[reqs_cpu.long()] == 1).all().item())
-                if is_pure_decode:
-                    from vllm_kunlun.models.deepseek_v4.kunlun_compressor_native import (
-                        NativeC4Ring,
-                        build_ape_op,
-                        compress_decode_native_c4,
-                    )
 
-                    if getattr(self, "_native_ring", None) is None:
-                        self._native_ring = NativeC4Ring(
-                            self.max_num_reqs, self.head_dim, state_cache.device
+                if getattr(self, "_native_ring", None) is None:
+                    self._native_ring = NativeC4Ring(
+                        self.max_num_reqs, self.head_dim, state_cache.device
+                    )
+                    self._native_ape_op = build_ape_op(
+                        self.ape.data, self.compress_ratio, self.head_dim
+                    )
+                ring = self._native_ring
+                # 首个 decode 步：把分页 state_cache 的最近 8 个状态回填进 ring
+                for req in reqs_cpu.unique().tolist():
+                    if not bool(ring.ready[req]):
+                        tok = (reqs_cpu == req).nonzero().flatten()[0]
+                        cur_pos = int(pos_cpu[tok])
+                        ring.backfill(
+                            req,
+                            cur_pos,
+                            state_cache,
+                            block_table[req],
+                            block_size,
                         )
-                        self._native_ape_op = build_ape_op(
-                            self.ape.data, self.compress_ratio, self.head_dim
-                        )
-                    ring = self._native_ring
-                    # 首个 decode 步：把分页 state_cache 的最近 8 个状态回填进 ring
-                    for req in reqs_cpu.unique().tolist():
-                        if not bool(ring.ready[req]):
-                            tok = (reqs_cpu == req).nonzero().flatten()[0]
-                            cur_pos = int(pos_cpu[tok])
-                            ring.backfill(
-                                req,
-                                cur_pos,
-                                state_cache,
-                                block_table[req],
-                                block_size,
-                            )
-                            ring.ready[req] = True
+                        ring.ready[req] = True
+                with prof("comp_native_c4"):
                     compress_decode_native_c4(
                         ring,
                         self._native_ape_op,
@@ -438,12 +456,12 @@ class DeepseekCompressor(nn.Module):
                         self.rope_head_dim,
                         self.compress_ratio,
                     )
-                    import logging as _logging
+                import logging as _logging
 
-                    _logging.getLogger("vllm_kunlun").info(
-                        "[KunlunPlugin] native C4 compressor path used (decode)"
-                    )
-                    return
+                _logging.getLogger("vllm_kunlun").info(
+                    "[KunlunPlugin] native C4 compressor path used (decode)"
+                )
+                return
 
             # torch 路径（prefill/混合批）：新请求（含 position 0）复位 ring，
             # 防止上一个使用同槽位请求的压缩状态串扰。
