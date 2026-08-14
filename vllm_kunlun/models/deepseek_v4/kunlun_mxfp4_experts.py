@@ -34,10 +34,16 @@ from vllm.model_executor.layers.fused_moe.experts.ocp_mx_emulation_moe import (
 from vllm_kunlun.models.deepseek_v4.prof import prof
 
 # OCP e2m1 grid: sign(1) exp(2) man(1)
-_E2M1_VALUES = (
-    [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0]
-    + [-0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0]
-)
+_E2M1_VALUES = [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0] + [
+    -0.0,
+    -0.5,
+    -1.0,
+    -1.5,
+    -2.0,
+    -3.0,
+    -4.0,
+    -6.0,
+]
 
 # Number of dequantized experts cached per MoE layer (LRU). 0 disables caching.
 _MOE_DQ_CACHE_SIZE = int(os.environ.get("DSV4_MOE_DQ_CACHE", "6"))
@@ -155,9 +161,7 @@ class KunlunEmulatedMxfp4Experts(OCP_MXQuantizationEmulationTritonExperts):
                         miss_ids.append(e)
 
                 if miss_ids:
-                    miss_t = torch.tensor(
-                        miss_ids, device=w1.device, dtype=torch.long
-                    )
+                    miss_t = torch.tensor(miss_ids, device=w1.device, dtype=torch.long)
                     w1_miss = dequant_mxfp4_torch(
                         w1[miss_t], self.w1_scale_val[miss_t], x.dtype
                     )
