@@ -25,6 +25,10 @@ def compute_swa_indices_and_lens(
     block_size: int,
     token_offset: int = 0,
 ) -> None:
+    # The metadata buffer is [max_tokens, 1, window_size]; the middle dim is a
+    # singleton. Squeeze it so the window axis (last dim) is window_size.
+    if swa_indices.dim() == 3:
+        swa_indices = swa_indices.squeeze(1)
     n = swa_indices.shape[0]
     if n == 0:
         return
@@ -49,7 +53,7 @@ def compute_swa_indices_and_lens(
     end = pos + 1
     swa_len = end - start
 
-    offs = torch.arange(swa_indices.shape[1], device=device)
+    offs = torch.arange(swa_indices.shape[-1], device=device)
     pos_off = start.unsqueeze(1) + offs.unsqueeze(0)
     # Clamp the block_table read into range (masked-out columns are ignored
     # downstream by valid_off, mirroring the kernel's load mask).
@@ -58,13 +62,21 @@ def compute_swa_indices_and_lens(
     slots = block_numbers * block_size + pos_off % block_size
     valid_off = (offs.unsqueeze(0) < swa_len.unsqueeze(1)) & valid.unsqueeze(1)
     swa_indices.copy_(
-        torch.where(
-            valid_off, slots.to(swa_indices.dtype), torch.full_like(slots, -1)
-        )
+        torch.where(valid_off, slots.to(swa_indices.dtype), torch.full_like(slots, -1))
     )
     swa_lens.copy_(
         torch.where(valid, swa_len.to(swa_lens.dtype), torch.zeros_like(swa_len))
     )
+    import os
+
+    if os.environ.get("DSV4_DEBUG_SWA") == "1":
+        print(
+            f"[SWA-COMPUTE] n={n} window={window_size} block_size={block_size} "
+            f"seq_lens={seq_lens.tolist()} prefix={prefix.tolist()} pos={pos.tolist()} "
+            f"swa_len={swa_len.tolist()} slots_first={slots[0][:6].tolist()} "
+            f"block_table_row0={block_table[reqs[0]][:4].tolist()}",
+            flush=True,
+        )
 
 
 class _TorchLaunchable:
@@ -133,6 +145,8 @@ def make_dspark_noncausal_launchable():
         **_,
     ):
         # Non-causal: block-anchored trailing window + full block.
+        if swa_indices.dim() == 3:
+            swa_indices = swa_indices.squeeze(1)
         n = swa_indices.shape[0]
         if n == 0:
             return
@@ -151,7 +165,7 @@ def make_dspark_noncausal_launchable():
         start = (prefix - window_size).clamp(min=0)
         end = sl
         swa_len = end - start
-        offs = torch.arange(swa_indices.shape[1], device=device)
+        offs = torch.arange(swa_indices.shape[-1], device=device)
         pos_off = start.unsqueeze(1) + offs.unsqueeze(0)
         block_indices = (pos_off // block_size).clamp(0, block_table.shape[1] - 1)
         block_numbers = block_table[reqs.unsqueeze(1), block_indices]
@@ -180,7 +194,9 @@ def compute_prefill_gather_lens(
     qe = query_start_loc[num_decodes + 1 : num_decodes + num_prefills + 1]
     qlen = qe - qs
     prefix = sl - qlen
-    pfx_gather_lens.copy_(qlen + torch.minimum(prefix, torch.full_like(prefix, window_size - 1)))
+    pfx_gather_lens.copy_(
+        qlen + torch.minimum(prefix, torch.full_like(prefix, window_size - 1))
+    )
 
 
 class _TorchFn:
