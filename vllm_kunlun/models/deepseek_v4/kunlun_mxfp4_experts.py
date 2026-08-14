@@ -186,7 +186,12 @@ class KunlunEmulatedMxfp4Experts(OCP_MXQuantizationEmulationTritonExperts):
             n_rows = flat_pos.shape[0]
             hid = x.shape[-1]
 
-            if n_rows <= 64:
+            # NOTE: the bf16 bmm path (decode/small-batch) produces NaN on Kunlun
+            # for the actual MXFP4-dequantized weight values (finite inputs), which
+            # cascades into the residual stream and corrupts the logits (BOS loop).
+            # The per-expert 2D matmul loop is numerically correct; keep it as the
+            # default. bmm remains opt-in via DSV4_MOE_BMM=1 for further diagnosis.
+            if n_rows <= 64 and os.environ.get("DSV4_MOE_BMM") == "1":
                 # Decode/small-batch path: bmm 批量链，避免逐 expert python 循环。
                 # （大 batch 下 [T*K, 2I, H] 展开会 OOM，走分组循环。）
                 x_exp = x.reshape(-1, hid)[
