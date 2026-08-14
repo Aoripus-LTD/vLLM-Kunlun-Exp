@@ -196,7 +196,7 @@ class KunlunPlatform(Platform):
 
         - If the cache block size is not set, it defaults to 16.
         - If MLA is enabled and `VLLM_ATTENTION_BACKEND` is not set or is set
-        to "FLASHMLA", the cache block size will be updated to 64.
+        to "FLASHMLA", the cache block size will be updated to 256.
         - When running with the DeepEP high-throughput backend, data parallelism
         greater than 1, and CUDA graph mode, eager execution will be enforced.
         This is because DP + DeepEP high-throughput kernels are not compatible
@@ -256,14 +256,14 @@ class KunlunPlatform(Platform):
             if (
                 use_flashmla
                 and is_flashmla_supported()[0]
-                and cache_config.block_size != 64
+                and cache_config.block_size != 256
             ):
-                cache_config.block_size = 64
-                logger.info("Forcing kv cache block size to 64 for FlashMLA backend.")
-            if use_sparse and cache_config.block_size != 64:
-                cache_config.block_size = 64
+                cache_config.block_size = 256
+                logger.info("Forcing kv cache block size to 256 for FlashMLA backend.")
+            if use_sparse and cache_config.block_size != 256:
+                cache_config.block_size = 256
                 logger.info(
-                    "Forcing kv cache block size to 64 for FlashMLASparse " "backend."
+                    "Forcing kv cache block size to 256 for FlashMLASparse " "backend."
                 )
 
         from vllm.config import CUDAGraphMode
