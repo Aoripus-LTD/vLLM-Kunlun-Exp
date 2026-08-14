@@ -322,18 +322,21 @@ class DeepseekCompressor(nn.Module):
         # GEMM; state_cache from this kernel) but neither emits/waits on PDL
         # grid dependency primitives, so launch_pdl=True caused a
         # read-after-write race and non-deterministic output.
-        save_partial_states(
-            kv=kv,
-            score=score,
-            ape=self.ape,
-            positions=positions,
-            state_cache=state_cache,
-            slot_mapping=slot_mapping,
-            block_size=block_size,
-            state_width=state_width,
-            compress_ratio=self.compress_ratio,
-            pdl_kwargs=pdl_kwargs,
-        )
+        from vllm_kunlun.models.deepseek_v4.prof import prof
+
+        with prof("comp_save_states"):
+            save_partial_states(
+                kv=kv,
+                score=score,
+                ape=self.ape,
+                positions=positions,
+                state_cache=state_cache,
+                slot_mapping=slot_mapping,
+                block_size=block_size,
+                state_width=state_width,
+                compress_ratio=self.compress_ratio,
+                pdl_kwargs=pdl_kwargs,
+            )
 
         # Fused: compress → RMSNorm → RoPE → FP8 quant → KV cache write.
         # RoPE requirements (kernel applies forward GPT-J style rotation):
@@ -422,22 +425,23 @@ class DeepseekCompressor(nn.Module):
                                 block_size,
                             )
                             ring.ready[req] = True
-                    compress_decode_native_c4(
-                        ring,
-                        self._native_ape_op,
-                        kv_score,
-                        pos_cpu,
-                        reqs_cpu,
-                        (pos_cpu + 1).to(torch.int32).to(kv_score.device),
-                        k_cache_metadata.slot_mapping,
-                        cos_sin_cache,
-                        kv_cache,
-                        kv_cache.shape[1],
-                        self.norm.weight,
-                        self.rms_norm_eps,
-                        self.rope_head_dim,
-                        self.compress_ratio,
-                    )
+                    with prof("comp_native_c4"):
+                        compress_decode_native_c4(
+                            ring,
+                            self._native_ape_op,
+                            kv_score,
+                            pos_cpu,
+                            reqs_cpu,
+                            (pos_cpu + 1).to(torch.int32).to(kv_score.device),
+                            k_cache_metadata.slot_mapping,
+                            cos_sin_cache,
+                            kv_cache,
+                            kv_cache.shape[1],
+                            self.norm.weight,
+                            self.rms_norm_eps,
+                            self.rope_head_dim,
+                            self.compress_ratio,
+                        )
                     import logging as _logging
 
                     _logging.getLogger("vllm_kunlun").info(
