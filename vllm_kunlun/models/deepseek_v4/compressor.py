@@ -4,6 +4,8 @@
 from dataclasses import dataclass
 from typing import Any, ClassVar, cast
 
+import os
+
 import torch
 from torch import nn
 from vllm.config import VllmConfig, get_current_vllm_config
@@ -337,7 +339,10 @@ class DeepseekCompressor(nn.Module):
         # GEMM; state_cache from this kernel) but neither emits/waits on PDL
         # grid dependency primitives, so launch_pdl=True caused a
         # read-after-write race and non-deterministic output.
-        if not will_use_native:
+        # Skip save_partial_states in the native ring path unless the env var
+        # explicitly re-enables it (correctness A/B: DSV4_SKIP_SAVE_STATES=0).
+        _skip_save_states = os.environ.get("DSV4_SKIP_SAVE_STATES", "1") == "1"
+        if not (will_use_native and _skip_save_states):
             with prof("comp_save_states"):
                 save_partial_states(
                     kv=kv,
