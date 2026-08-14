@@ -34,10 +34,16 @@ from vllm.model_executor.layers.fused_moe.experts.ocp_mx_emulation_moe import (
 from vllm_kunlun.models.deepseek_v4.prof import prof
 
 # OCP e2m1 grid: sign(1) exp(2) man(1)
-_E2M1_VALUES = (
-    [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0]
-    + [-0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0]
-)
+_E2M1_VALUES = [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0] + [
+    -0.0,
+    -0.5,
+    -1.0,
+    -1.5,
+    -2.0,
+    -3.0,
+    -4.0,
+    -6.0,
+]
 
 # Number of dequantized experts cached per MoE layer (LRU). 0 disables caching.
 _MOE_DQ_CACHE_SIZE = int(os.environ.get("DSV4_MOE_DQ_CACHE", "6"))
@@ -155,9 +161,7 @@ class KunlunEmulatedMxfp4Experts(OCP_MXQuantizationEmulationTritonExperts):
                         miss_ids.append(e)
 
                 if miss_ids:
-                    miss_t = torch.tensor(
-                        miss_ids, device=w1.device, dtype=torch.long
-                    )
+                    miss_t = torch.tensor(miss_ids, device=w1.device, dtype=torch.long)
                     w1_miss = dequant_mxfp4_torch(
                         w1[miss_t], self.w1_scale_val[miss_t], x.dtype
                     )
@@ -186,7 +190,12 @@ class KunlunEmulatedMxfp4Experts(OCP_MXQuantizationEmulationTritonExperts):
             n_rows = flat_pos.shape[0]
             hid = x.shape[-1]
 
-            if n_rows <= 64:
+            # NOTE: the bf16 bmm path (decode/small-batch) produces NaN on Kunlun
+            # for the actual MXFP4-dequantized weight values (finite inputs), which
+            # cascades into the residual stream and corrupts the logits (BOS loop).
+            # The per-expert 2D matmul loop is numerically correct; keep it as the
+            # default. bmm remains opt-in via DSV4_MOE_BMM=1 for further diagnosis.
+            if n_rows <= 64 and os.environ.get("DSV4_MOE_BMM") == "1":
                 # Decode/small-batch path: bmm 批量链，避免逐 expert python 循环。
                 # （大 batch 下 [T*K, 2I, H] 展开会 OOM，走分组循环。）
                 x_exp = x.reshape(-1, hid)[
