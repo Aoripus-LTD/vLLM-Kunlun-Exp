@@ -340,17 +340,21 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         # Metadata-independent input GEMMs + RMSNorm stay in the captured
         # graph; the metadata-dependent rest (q up-proj + kv-insert, indexer,
         # compressor, MLA attention) runs in the eager break.
-        qr_kv, kv_score, indexer_kv_score, indexer_weights = (
-            self.attn_gemm_parallel_execute(hidden_states)
-        )
+        from vllm_kunlun.models.deepseek_v4.prof import prof
+
+        with prof("attn_input_gemm"):
+            qr_kv, kv_score, indexer_kv_score, indexer_weights = (
+                self.attn_gemm_parallel_execute(hidden_states)
+            )
         qr, kv = qr_kv.split([self.q_lora_rank, self.head_dim], dim=-1)
-        qr, kv = fused_q_kv_rmsnorm(
-            qr,
-            kv,
-            self.q_norm.weight.data,
-            self.kv_norm.weight.data,
-            self.eps,
-        )
+        with prof("attn_qkv_rmsnorm"):
+            qr, kv = fused_q_kv_rmsnorm(
+                qr,
+                kv,
+                self.q_norm.weight.data,
+                self.kv_norm.weight.data,
+                self.eps,
+            )
 
         # attention_impl is wrapped with @eager_break_during_capture: this is
         # where the breakable cudagraph capture breaks (the attention op runs
@@ -368,7 +372,8 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         o = o_padded[:, : self.n_local_heads, :]
 
         # Inverse-RoPE + wo_a + wo_b output projection (platform-specific).
-        return self._o_proj(o, positions)
+        with prof("attn_o_proj"):
+            return self._o_proj(o, positions)
 
     def attn_gemm_parallel_execute(self, hidden_states) -> tuple[Any, ...]:
         aux_streams = self.aux_stream_list

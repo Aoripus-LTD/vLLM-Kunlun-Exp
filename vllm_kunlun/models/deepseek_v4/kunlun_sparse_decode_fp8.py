@@ -232,36 +232,37 @@ def xpu_sparse_decode_fp8(
     import os as _os
 
     if _os.environ.get("DSV4_TORCH_ATTN") != "1" and seq_lens is not None:
-        num_heads = q.shape[1]
-        # win_indices into the SWA segment of the workspace (rows max_topk..)
-        win_kv = ws_3d[:, max_topk:, :].reshape(num_tokens * max_swa, OUTPUT_DIM)
-        win_idx = torch.arange(
-            num_tokens * max_swa, device=device, dtype=torch.int32
-        ).view(num_tokens, max_swa)
-        win_idx = torch.where(
-            valid_s.view(num_tokens, max_swa),
-            win_idx,
-            torch.full_like(win_idx, -1),
-        ).contiguous()
-        if not swa_only and max_topk > 0:
-            com_kv = ws_3d[:, :max_topk, :].reshape(num_tokens * max_topk, OUTPUT_DIM)
-            com_idx = torch.arange(
-                num_tokens * max_topk, device=device, dtype=torch.int32
-            ).view(num_tokens, max_topk)
-            com_idx = torch.where(
-                valid.view(num_tokens, max_topk),
-                com_idx,
-                torch.full_like(com_idx, -1),
+        with prof("attn_index_build"):
+            num_heads = q.shape[1]
+            # win_indices into the SWA segment of the workspace (rows max_topk..)
+            win_kv = ws_3d[:, max_topk:, :].reshape(num_tokens * max_swa, OUTPUT_DIM)
+            win_idx = torch.arange(
+                num_tokens * max_swa, device=device, dtype=torch.int32
+            ).view(num_tokens, max_swa)
+            win_idx = torch.where(
+                valid_s.view(num_tokens, max_swa),
+                win_idx,
+                torch.full_like(win_idx, -1),
             ).contiguous()
-        else:
-            com_kv = None
-            com_idx = None
-        qlod_cpu = torch.arange(num_tokens + 1, dtype=torch.int32)
-        qlod_xpu = qlod_cpu.to(device)
-        kvlen_cpu = seq_lens[:num_tokens].to(torch.int32).cpu()
-        kvlen_xpu = kvlen_cpu.to(device)
-        max_logits = torch.empty(num_tokens, num_heads, dtype=torch.float32, device=device)
-        lse = torch.empty(num_tokens, num_heads, dtype=torch.float32, device=device)
+            if not swa_only and max_topk > 0:
+                com_kv = ws_3d[:, :max_topk, :].reshape(num_tokens * max_topk, OUTPUT_DIM)
+                com_idx = torch.arange(
+                    num_tokens * max_topk, device=device, dtype=torch.int32
+                ).view(num_tokens, max_topk)
+                com_idx = torch.where(
+                    valid.view(num_tokens, max_topk),
+                    com_idx,
+                    torch.full_like(com_idx, -1),
+                ).contiguous()
+            else:
+                com_kv = None
+                com_idx = None
+            qlod_cpu = torch.arange(num_tokens + 1, dtype=torch.int32)
+            qlod_xpu = qlod_cpu.to(device)
+            kvlen_cpu = seq_lens[:num_tokens].to(torch.int32).cpu()
+            kvlen_xpu = kvlen_cpu.to(device)
+            max_logits = torch.empty(num_tokens, num_heads, dtype=torch.float32, device=device)
+            lse = torch.empty(num_tokens, num_heads, dtype=torch.float32, device=device)
         with prof("attn_core"):
             torch.ops.xspeedgate_ops.compressed_attention(
                 q.contiguous(),

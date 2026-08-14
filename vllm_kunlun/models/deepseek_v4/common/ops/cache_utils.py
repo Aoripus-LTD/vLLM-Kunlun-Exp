@@ -59,19 +59,23 @@ def gather_ds_mla_slots_torch(
     slots: torch.Tensor,  # [n] int64 global slot ids, all >= 0
 ) -> torch.Tensor:
     """Gather and dequantize rows at global slot ids. Returns fp32 [n, 512]."""
+    from vllm_kunlun.models.deepseek_v4.prof import prof
+
     device = slots.device
     cache2d = cache.reshape(cache.shape[0], -1)
-    block_ids = slots // block_size
-    pos_in_block = slots % block_size
-    data_off = (pos_in_block * TOKEN_DATA_SIZE).unsqueeze(1) + torch.arange(
-        TOKEN_DATA_SIZE, device=device
-    )
-    rows = cache2d[block_ids.unsqueeze(1), data_off]  # [n, 576]
-    scale_off = (
-        block_size * TOKEN_DATA_SIZE + pos_in_block * TOKEN_SCALE_DIM
-    ).unsqueeze(1) + torch.arange(N_QUANT_BLOCKS, device=device)
-    sbytes = cache2d[block_ids.unsqueeze(1), scale_off]  # [n, 7]
-    return dequant_ds_mla_576_rows_torch(rows, sbytes)
+    with prof("cache_gather"):
+        block_ids = slots // block_size
+        pos_in_block = slots % block_size
+        data_off = (pos_in_block * TOKEN_DATA_SIZE).unsqueeze(1) + torch.arange(
+            TOKEN_DATA_SIZE, device=device
+        )
+        rows = cache2d[block_ids.unsqueeze(1), data_off]  # [n, 576]
+        scale_off = (
+            block_size * TOKEN_DATA_SIZE + pos_in_block * TOKEN_SCALE_DIM
+        ).unsqueeze(1) + torch.arange(N_QUANT_BLOCKS, device=device)
+        sbytes = cache2d[block_ids.unsqueeze(1), scale_off]  # [n, 7]
+    with prof("cache_dequant"):
+        return dequant_ds_mla_576_rows_torch(rows, sbytes)
 
 
 @triton.jit
