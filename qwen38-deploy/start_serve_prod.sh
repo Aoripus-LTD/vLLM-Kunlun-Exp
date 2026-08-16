@@ -31,6 +31,8 @@ nohup /opt/vllm_kunlun/bin/python -m vllm.entrypoints.openai.api_server \
   --served-model-name qwen3.8-kunlun \
   --max-num-seqs 256 \
   --reasoning-parser qwen3 \
+  --enable-auto-tool-choice \
+  --tool-call-parser qwen3_xml \
   > "$LOG" 2>&1 &
 
 echo $! > /home/newdata/logs/serve.pid
