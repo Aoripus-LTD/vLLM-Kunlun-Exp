@@ -7,6 +7,7 @@
 | 脚本 | 用途 | 运行位置 |
 |---|---|---|
 | `01_env_check_v3.sh` + `xccl_bench.py` | 环境自检 + XCCL allreduce 带宽基准 | 服务器（容器内） |
+| `xccl_scan.py` | XCCL 扫描矩阵（world × 消息大小，延迟/带宽曲线） | 服务器（容器内） |
 | `03_vllm_load.py` | 加载验证 + 短/长上下文召回 | 服务器（容器内） |
 | `04_throughput_bench.py` | 吞吐压测（short/long 两组，仅 TP=8） | 服务器（容器内） |
 | `run03.sh` / `run04.sh` + `watch_03_run.py` / `watch04.py` | 03/04 编排 + 日志轮询 | 服务器（容器内）/ 本机 |
