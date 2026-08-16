@@ -1018,10 +1018,13 @@ def _cslot_apply(mod):
     )
 
 
-for _target in (
-    "vllm.v1.attention.backends.mla.compressor_utils",
-    "vllm.v1.attention.backends.mla.indexer",
-):
+# [qwen38-dev] hook 14 DISABLED: mla compressor_utils/indexer 的 compressed
+# slot mapping patch 是 DeepSeek V4 专用 (DeepseekV4IndexerBackend), Qwen3.5
+# 用不到。其 import 链 (kunlun_compressor_utils -> deepseek_v4.model ->
+# vllm.model_executor.layers.fused_moe) 与 PyPI vllm 0.25.1 循环 import,
+# 每次 import 触发一次完整 traceback 刷屏 (数万行日志拖死启动)。
+# 恢复方法: 把空列表改回原两个 target 字符串。
+for _target in ():
     _register_post_import_hook(_target, _cslot_applied, _cslot_apply)
 
 

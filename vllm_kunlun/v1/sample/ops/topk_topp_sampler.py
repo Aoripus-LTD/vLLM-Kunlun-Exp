@@ -62,17 +62,23 @@ class TopKTopPSampler(nn.Module):
         p: Optional[torch.Tensor],
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """More optimized implementation for top-k and top-p sampling."""
-        if (k is None and p is None) or generators:
-            if generators:
-                logger.debug_once(
-                    "FlashInfer 0.2.3+ does not support "
-                    "per-request generators. Falling back to "
-                    "PyTorch-native implementation."
-                )
+        if generators:
+            logger.debug_once(
+                "FlashInfer 0.2.3+ does not support "
+                "per-request generators. Falling back to "
+                "PyTorch-native implementation."
+            )
             return self.forward_native(logits, generators, k, p)
         # flashinfer sampling functions expect contiguous logits.
         # In flex_attn/triton_attn fp32 inference, logits can be non-contiguous
         # because of slicing operation in logits_processor.
+        #
+        # NOTE(kunlun-deploy): 2026-08-16 昆仑芯部署修复 —— k/p 均为 None（即
+        # top_k=0/top_p=1.0 被归一化后的默认采样）也走设备采样算子，避免
+        # forward_native 的 random_sample 里 q.exponential_() 在昆仑芯上
+        # CPU fallback（256 batch × 152K vocab 实测 4.89s/step，GPU 0%）。
+        # flashinfer_sample 内部对 None 补 top_k=vocab / top_p=1.0，
+        # 数学上等效无过滤纯随机采样。
         return flashinfer_sample(logits.contiguous(), k, p, generators), None
 
 
@@ -168,14 +174,15 @@ def random_sample(
     if generators:
         # TODO(woosuk): This can be slow because we handle each request
         # one by one. Optimize this.
-        if os.getenv("FAST_RANDOM_SAMPLE") == "1":
-            for i, generator in generators.items():
-                q[i].uniform_(generator=generator)
-            q = -torch.log(q)
-            q = q.clamp(min=1e-12)
-        else:
-            for i, generator in generators.items():
-                torch.ops.xspeedgate_ops.inplace_exponential(q[i], generator=generator)
+        # NOTE(kunlun-deploy): 2026-08-16 昆仑芯部署修复 —— xspeedgate_ops
+        # .inplace_exponential 在当前官方组合（xspeedgate_ops-0.0.0+torch25）
+        # 中不存在（AttributeError，带 seed 请求解码即崩）。统一改用
+        # uniform_ + (-log) 得到统计等价的指数噪声（FAST_RANDOM_SAMPLE 同款
+        # 算法；-log(U) ~ Exp(1)），且 uniform_ 有设备 kernel（实测 0.01s）。
+        for i, generator in generators.items():
+            q[i].uniform_(generator=generator)
+        q = -torch.log(q)
+        q = q.clamp(min=1e-12)
     return probs.div_(q).argmax(dim=-1).view(-1)
 
 
@@ -199,24 +206,20 @@ def flashinfer_sample(
     does not. Call this function at the end of the forward pass to minimize
     the synchronization overhead.
     """
-    assert not (k is None and p is None)
     probs = logits.softmax(dim=-1, dtype=torch.float32)
     if k is None:
-        # Top-p only.
-        next_token_ids = kunlun_ops.top_p_sampling_from_probs(
-            probs, top_p=p, deterministic=True
-        )
-    elif p is None:
-        # Top-k only.
-        next_token_ids = kunlun_ops.top_k_sampling_from_probs(
-            probs, top_k=k, deterministic=True
-        )
+        # 无 top-k 过滤：等效 top_k=vocab（全词表）
+        k = torch.full((probs.shape[0],), probs.shape[-1], dtype=torch.int32,
+                       device=probs.device)
     else:
-        # Both top-k and top-p.
         k = k.to(torch.int32)
-        next_token_ids = kunlun_ops.top_k_top_p_sampling_from_probs(
-            probs, top_k=k, top_p=p, deterministic=True
-        )
+    if p is None:
+        # 无 top-p 过滤：等效 top_p=1.0
+        p = torch.ones((probs.shape[0],), dtype=torch.float32, device=probs.device)
+    # 统一走 top_k_top_p 采样（None 补默认值后数学上等价于原三分支）
+    next_token_ids = kunlun_ops.top_k_top_p_sampling_from_probs(
+        probs, top_k=k, top_p=p, deterministic=True
+    )
 
     return next_token_ids.view(-1)
 
