@@ -1,10 +1,10 @@
 # 部署资产
 
-所有脚本在 `qwen38-deploy/` 目录（仓库内）。
+所有脚本位于仓库内 `qwen38-deploy/` 目录。
 
 ## 核心脚本
 
-| 脚本 | 用途 | 在哪跑 |
+| 脚本 | 用途 | 运行位置 |
 |---|---|---|
 | `01_env_check_v3.sh` + `xccl_bench.py` | 环境自检 + XCCL allreduce 带宽基准 | 服务器（容器内） |
 | `03_vllm_load.py` | 加载验证 + 短/长上下文召回 | 服务器（容器内） |
@@ -15,10 +15,10 @@
 
 | 脚本 | 用途 |
 |---|---|
-| `rollback_4885de2_part1.sh` | 回退 part1：备份 2fda97b → 解压 4885de2 → 替换 site-packages → vllm 0.15.1 |
-| `rollback_4885de2_part2.sh` | 回退 part2：仓库根备份 + 覆盖（路径 bug 已并入 part3） |
+| `rollback_4885de2_part1.sh` | 回退 part1：备份 2fda97b → 解压 4885de2 → 替换 site-packages → 安装 vllm 0.15.1 |
+| `rollback_4885de2_part2.sh` | 回退 part2：仓库根备份 + 覆盖（路径问题已并入 part3） |
 | `rollback_4885de2_part3.sh` | 回退 part3：仓库根编译 _kunlun → 补丁（eval_frame/quantization/patch_torch251）→ import 验证 |
-| `fix_tf_5_2_0.sh` | transformers 5.5.3 → 5.2.0（缺 max_pixels API） |
+| `fix_tf_5_2_0.sh` | transformers 5.5.3 → 5.2.0（缺失 max_pixels API） |
 
 ## 验证/诊断脚本
 
@@ -34,12 +34,12 @@
 
 | 脚本 | 用途 |
 |---|---|
-| `ssh_run.py` | paramiko SSH 执行/上传（连接参数全走环境变量） |
-| `hash_verify.sh` | 容器↔本机源码 md5 清单比对（LF 级） |
+| `ssh_run.py` | paramiko SSH 执行/上传（连接参数全部走环境变量） |
+| `hash_verify.sh` | 容器与本机源码 md5 清单比对（LF 级） |
 | `sync_vllm_kunlun.sh` | 源码同步（备份 → 覆盖 → 重编译 _kunlun → 重拷补丁 → 验证） |
 | `fetch_docs.py` | readthedocs 全站爬取器（本地文档索引） |
 
-## SSH 用法（ssh_run.py）
+## SSH 工具用法（ssh_run.py）
 
 ```powershell
 # PowerShell（本机）
@@ -52,9 +52,10 @@ python ssh_run.py "docker exec -it qwen38-p800 bash -lc '命令'"
 
 !!! warning "ssh_run.py 注意事项"
     - 连接参数与凭据**绝不入库**，全部从环境变量读取（QWEN38_HOST / QWEN38_PORT / QWEN38_USER / QWEN38_SSH_PASS）
-    - stdout 含 emoji 时需 `PYTHONIOENCODING=utf-8` 前缀（本机 GBK 会 UnicodeEncodeError）
-    - **多余位置参数会追加进远程命令**——勿传多余参数
-    - 参数绝不使用双引号（PowerShell 吞引号）→ 复杂命令写 .sh 上传执行
+    - stdout 含 emoji 时需加 `PYTHONIOENCODING=utf-8` 前缀（Windows GBK 下会
+      UnicodeEncodeError）
+    - **多余位置参数会追加进远程命令**——不要传入多余参数
+    - 参数不要使用双引号（PowerShell 会吞引号）——复杂命令写 .sh 上传执行
 
 ## 03 加载验证脚本参数（权威）
 
@@ -62,5 +63,5 @@ python ssh_run.py "docker exec -it qwen38-p800 bash -lc '命令'"
 python 03_vllm_load.py --model /home/newdata/models/Qwen3.8-27B-W8A8-INT8-Dynamic
 ```
 
-脚本内置定稿参数：TP=8 固定、`--max-model-len 262144`、去 YaRN、`--dtype float16`、
+脚本内置定稿参数：TP=8 固定、`--max-model-len 262144`、无 YaRN、`--dtype float16`、
 `--quantization kl3-compressed-xline`、`--mamba-ssm-cache-dtype float16`。

@@ -1,7 +1,7 @@
 # 安装
 
 逐步安装详解。**先决条件**：容器已创建（见 [快速开始](quickstart.md)），8 卡全映射，
-数据路径 `/home/newdata`（14T LVM，docker data-root = `/home/docker`，无需改 daemon.json）。
+数据路径 `/home/newdata`（14T LVM，docker data-root 为 `/home/docker`，无需修改 daemon.json）。
 
 ## 版本对照（官方验证组合，issue #387 同款）
 
@@ -11,15 +11,15 @@
 | kunlun_ops | 0.1.58 | whl：`uv pip install kunlun_ops-0.1.58+ee39020a` |
 | triton | 3.0.0+b2cde523 | whl |
 | xspeedgate_ops | 0.0.0+torch25 | whl |
-| cocopod | 0.0.0+torch25 | whl（**需 `UV_SKIP_WHEEL_FILENAME_CHECK=1`**） |
+| cocopod | 0.0.0+torch25 | whl（需 `UV_SKIP_WHEEL_FILENAME_CHECK=1`） |
 | vllm | 0.15.1 | PyPI：`uv pip install vllm==0.15.1 --force-reinstall --no-deps` |
 | vllm-kunlun | 0.15.1.dev0（4885de2） | 仓库根 `python setup.py build && python setup.py install` |
 | transformers | 5.2.0 | PyPI：`uv pip install transformers==5.2.0 --no-deps --force-reinstall` |
 
-!!! danger "版本对应铁律"
-    **kunlun_ops 0.1.58 只匹配 0.15.1.dev0 时代源码**。若装 vllm-kunlun 0.25.1-dev
-    （2fda97b），会遇 causal_conv1d 关键字参数、11 个缺失算子、3 个 KW_MISMATCH——
-    接口鸿沟系统性，修不动，只能整体回退（见 [故障排查](troubleshooting.md)）。
+!!! danger "版本兼容性要求"
+    kunlun_ops 0.1.58 仅匹配 0.15.1.dev0 时代源码。若安装 vllm-kunlun 0.25.1-dev
+    （2fda97b），将出现 causal_conv1d 关键字参数、11 个缺失算子、3 个 KW_MISMATCH
+    等系统性接口不兼容，无法通过补丁修复，需整体回退（见 [故障排查](troubleshooting.md)）。
 
 ## Step 1：装包
 
@@ -41,21 +41,21 @@ $UV transformers==5.2.0 --no-deps --force-reinstall
 ## Step 2：编译 vllm-kunlun
 
 ```bash
-cd /home/newdata/vLLM-Kunlun-0.25.1-dev     # 仓库根（构建文件在这里）
+cd /home/newdata/vLLM-Kunlun-0.25.1-dev     # 仓库根（构建文件所在目录）
 python setup.py build
 python setup.py install
 ```
 
 - `_kunlun` 扩展产物：包根 `_kunlun.cpython-310-x86_64-linux-gnu.so`（13.5MB）
-- **editable 陷阱**：import 实际加载 site-packages/vllm_kunlun（`.pth` 被遮蔽），
-  源码同步要双份（site-packages + 仓库根）
+- **editable 安装形态说明**：import 实际加载 site-packages/vllm_kunlun（`.pth` 被遮蔽），
+  源码同步需双份（site-packages 与仓库根）
 
 ## Step 3：补丁
 
 ```bash
 cd /home/newdata/vLLM-Kunlun-0.25.1-dev
 
-# torch 2.5.1 兼容补丁（vllm-kunlun 自带，对 vllm 0.15.x 写 → 11 applied / 0 failed）
+# torch 2.5.1 兼容补丁（vllm-kunlun 自带，针对 vllm 0.15.x：11 applied / 0 failed）
 python vllm_kunlun/patches/patch_torch251.py
 
 # eval_frame + quantization 替换（vllm-kunlun 的昆仑芯实现）
@@ -72,7 +72,7 @@ PY=/opt/vllm_kunlun/bin/python
 # torch + 加速器
 $PY -c "import torch; print(torch.__version__, hasattr(torch, 'accelerator'))"
 
-# 设备数（真验证，torch.xpu.device_count()=0 是假象）
+# 设备数（torch.xpu.device_count() 返回 0 不具备参考意义，以此接口为准）
 $PY -c "import torch_xmlir; print(torch_xmlir._XMLIRC._xpu_get_devices_number())"   # 期望 8
 
 # vllm-kunlun 加载位置（应为 site-packages）

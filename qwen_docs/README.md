@@ -23,7 +23,7 @@ mkdocs build                            # 输出 site/ 目录
 
 - **GitHub Pages**：`mkdocs gh-deploy` 或 Actions 推送 `site/`
 - **Nginx/任意 Web 服务器**：上传 `site/` 即可
-- **Read the Docs**：项目根加 `.readthedocs.yaml` 指向 `qwen_docs/` 目录
+- **Read the Docs**：项目根添加 `.readthedocs.yaml` 指向 `qwen_docs/` 目录
 
 ## 目录结构
 
@@ -45,5 +45,5 @@ qwen_docs/
 
 ## 内容维护
 
-素材来源：CLAUDE.md（项目知识库）、README_deploy.md（部署决策）、03/04 验证脚本。
-更新文档后按仓库规范提交（qwen38-dev 分支）。
+素材来源：内部部署记录与 03/04 验证脚本。更新文档后按仓库规范提交（qwen38-dev
+分支）。
