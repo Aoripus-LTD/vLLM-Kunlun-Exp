@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>vLLM-Kunlun-Exp</title>
+<style>
+  :root {
+    --bg: #f8f9fb;
+    --card: #ffffff;
+    --border: #e3e6ec;
+    --text: #1a1d24;
+    --muted: #6b7280;
+    --accent: #4f46e5;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #111318;
+      --card: #1a1d24;
+      --border: #2a2e38;
+      --text: #e8eaef;
+      --muted: #9aa1ad;
+      --accent: #818cf8;
+    }
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+  }
+  .wrap { max-width: 860px; width: 100%; text-align: center; }
+  .logo {
+    font-size: 14px; letter-spacing: .12em; text-transform: uppercase;
+    color: var(--accent); font-weight: 600; margin-bottom: 12px;
+  }
+  h1 { font-size: 34px; font-weight: 700; margin-bottom: 10px; }
+  .sub { color: var(--muted); font-size: 16px; margin-bottom: 40px; line-height: 1.6; }
+  .cards { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+  @media (max-width: 640px) { .cards { grid-template-columns: 1fr; } }
+  .card {
+    display: block; text-align: left; text-decoration: none;
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: 12px; padding: 26px; transition: transform .15s, border-color .15s, box-shadow .15s;
+  }
+  .card:hover { transform: translateY(-3px); border-color: var(--accent); box-shadow: 0 8px 24px rgba(0,0,0,.08); }
+  .card .tag {
+    display: inline-block; font-size: 12px; font-weight: 600; letter-spacing: .06em;
+    color: var(--accent); background: rgba(79,70,229,.1); border-radius: 999px;
+    padding: 3px 10px; margin-bottom: 14px;
+  }
+  .card h2 { font-size: 19px; margin-bottom: 8px; color: var(--text); }
+  .card p { color: var(--muted); font-size: 14px; line-height: 1.6; }
+  footer { margin-top: 36px; color: var(--muted); font-size: 13px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="logo">vLLM-Kunlun-Exp</div>
+  <h1>昆仑芯 vLLM-Kunlun 部署文档</h1>
+  <p class="sub">Qwen3.8-27B-INT8-W8A8-Dynamic 在 8×96G 昆仑芯 P800-OAM 上的完整部署手册</p>
+  <div class="cards">
+    <a class="card" href="./qwen38-dev/">
+      <span class="tag">分支 · qwen38-dev</span>
+      <h2>Qwen3.8 部署手册（中文文档站）</h2>
+      <p>快速开始、安装、模型与量化、启动参数、性能压测、故障排查、部署资产</p>
+    </a>
+    <a class="card" href="https://vllm-kunlun.readthedocs.io/">
+      <span class="tag">分支 · main</span>
+      <h2>vLLM-Kunlun 官方文档（readthedocs）</h2>
+      <p>官方安装教程、开发者指南、多卡部署示例（与上游 main 分支同步）</p>
+    </a>
+  </div>
+  <footer><a href="https://github.com/Aoripus-LTD/vLLM-Kunlun-Exp" style="color:var(--muted)">GitHub 仓库</a> · Aoripus LTD</footer>
+</div>
+</body>
+</html>
