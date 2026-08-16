@@ -10,7 +10,6 @@ theme:
   features:
     - navigation.top
     - navigation.expand
-    - toc.integrate
     - content.code.copy
     - content.code.annotate
   palette:
@@ -55,7 +54,7 @@ extra:
     - icon: fontawesome/brands/github
       link: https://github.com/Aoripus-LTD/vLLM-Kunlun-Exp
 
-copyright: Copyright &copy; 2026 Aoripus LTD
+copyright: Copyright &copy; 2026 Aoripus (Beijing) Technology Co., Ltd.
 
 nav:
   - 首页: index.md
