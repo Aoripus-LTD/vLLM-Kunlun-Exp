@@ -1,0 +1,70 @@
+site_name: Qwen3.8-27B on Kunlun P800
+site_description: 昆仑芯 P800 部署 Qwen3.8-27B W8A8 INT8（vllm-kunlun 0.15.1.dev0）完整部署手册
+site_author: aoripus
+repo_url: https://github.com/Aoripus-LTD/vLLM-Kunlun-Exp
+edit_uri: blob/qwen38-dev/qwen_docs/docs/
+
+theme:
+  name: material
+  language: zh
+  features:
+    - navigation.tabs
+    - navigation.top
+    - navigation.expand
+    - toc.integrate
+    - content.code.copy
+    - content.code.annotate
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-7
+        name: 切换到深色模式
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-4
+        name: 切换到浅色模式
+
+markdown_extensions:
+  - admonition
+  - pymdownx.details
+  - pymdownx.superfences
+  - pymdownx.tabbed
+  - pymdownx.highlight
+  - pymdownx.inlinehilite
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+  - tables
+  - attr_list
+  - toc:
+      permalink: true
+
+plugins:
+  - search:
+      lang:
+        - zh
+        - en
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/Aoripus-LTD/vLLM-Kunlun-Exp
+
+copyright: Copyright &copy; 2026 Aoripus LTD
+
+nav:
+  - 首页: index.md
+  - 项目概览: overview.md
+  - 快速开始: quickstart.md
+  - 安装: installation.md
+  - 模型与适配: model.md
+  - 启动参数: launch.md
+  - 性能与压测: performance.md
+  - 故障排查: troubleshooting.md
+  - 部署资产: assets.md
