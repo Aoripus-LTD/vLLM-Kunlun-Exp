@@ -1,0 +1,5 @@
+# 部署脚本必须在 Linux 容器执行，统一 LF 防止 CRLF 破坏
+*.sh text eol=lf
+*.py text eol=lf
+*.md text eol=lf
+*.txt text eol=lf
