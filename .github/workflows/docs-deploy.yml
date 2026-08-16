@@ -25,12 +25,16 @@ jobs:
       - name: Install mkdocs-material
         run: |
           pip install mkdocs-material
+      # 注意：mkdocs 的 -d（site_dir）相对配置文件目录（qwen_docs/）解析，
+      # 用 working-directory 对齐 cwd 与 config 目录，../site 落盘到仓库根 site/
       - name: Build docs to subpath (branch qwen38-dev)
+        working-directory: qwen_docs
         run: |
-          mkdocs build --strict -f qwen_docs/mkdocs.yml -d site/qwen38-dev
+          mkdocs build --strict -d ../site/qwen38-dev
       - name: Install branch landing page
+        working-directory: qwen_docs
         run: |
-          cp .github/pages-landing/index.html site/index.html
+          cp ../.github/pages-landing/index.html ../site/index.html
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
