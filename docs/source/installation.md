@@ -118,12 +118,6 @@ bash xpytorch-cp310-torch251-ubuntu2004-x64.run --noexec --target xpytorch_unpac
 sed -i 's/pip/uv pip/g; s/CONDA_PREFIX/VIRTUAL_ENV/g' setup.sh && bash setup.sh
 ```
 
-## Applying PyTorch patches
-
-```
-python vllm_kunlun/patches/patch_torch251.py
-```
-
 ## Install Kunlun-related packages
 
 ```

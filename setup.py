@@ -73,14 +73,8 @@ if __name__ == "__main__":
             "vllm.platform_plugins": ["kunlun = vllm_kunlun:register"],
             "vllm.general_plugins": [
                 "kunlun_model = vllm_kunlun:register_model",
-                "kunlun_quant = vllm_kunlun:register_quant_method",
                 "kunlun_reasoning_parser = vllm_kunlun:register_reasoning_parser",
                 "kunlun_tool_parser = vllm_kunlun:register_tool_parser",
             ],
-            # FusedMoE CustomOp OOT
-            "vllm.plugins": [
-                "kunlun_fused_moe = vllm_kunlun.ops.fused_moe:register_kunlun_fused_moe_ops"
-            ],
-            "console_scripts": ["vllm_kunlun = vllm_kunlun.entrypoints.main:main"],
         },
     )
