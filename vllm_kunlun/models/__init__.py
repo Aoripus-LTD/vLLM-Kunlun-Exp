@@ -104,6 +104,16 @@ def register_model():
     )
 
     ModelRegistry.register_model(
+        "Qwen3_5MTP",
+        "vllm_kunlun.models.qwen3_5_mtp:Qwen3_5MTP",
+    )
+
+    ModelRegistry.register_model(
+        "Qwen3_5MoeMTP",
+        "vllm_kunlun.models.qwen3_5_mtp:Qwen3_5MoeMTP",
+    )
+
+    ModelRegistry.register_model(
         "Gemma4ForCausalLM", "vllm_kunlun.models.gemma4:Gemma4ForCausalLM"
     )
 
@@ -112,18 +122,13 @@ def register_model():
         "vllm_kunlun.models.gemma4_mm:Gemma4ForConditionalGeneration",
     )
 
-    # DeepSeek V4 (Flash): Kunlun fork of the upstream XPU branch. Overrides the
-    # upstream registration so the NVIDIA dispatch path is never taken on Kunlun.
-    ModelRegistry.register_model(
-        "DeepseekV4ForCausalLM",
-        "vllm_kunlun.models.deepseek_v4.model:DeepseekV4ForCausalLM",
-    )
-
-    ModelRegistry.register_model(
-        "DeepSeekV4MTPModel",
-        "vllm_kunlun.models.deepseek_v4.mtp:DeepSeekV4MTP",
-    )
-
 
 def register_quant_method():
     """to do"""
+
+# Module-level autoregistration: the vLLM plugin entry (register()) does not
+# call register_model(); importing this package is guaranteed to happen during
+# main-model config resolution (vllm.model_executor.models.config is remapped
+# here), which precedes draft-model resolution. Registering on import makes
+# Qwen3_5MTP resolvable by the ModelRegistry for MTP speculative decoding.
+register_model()

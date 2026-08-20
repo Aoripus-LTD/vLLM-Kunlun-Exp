@@ -91,9 +91,9 @@ from vllm.multimodal.processing import (
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.platforms import _Backend, current_platform
 from vllm.sequence import IntermediateTensors
-from vllm.tokenizers import TokenizerLike as AnyTokenizer
 from vllm.transformers_utils.config import uses_mrope
 from vllm.transformers_utils.processor import cached_image_processor_from_config
+from vllm.transformers_utils.tokenizer import AnyTokenizer
 
 logger = init_logger(__name__)
 

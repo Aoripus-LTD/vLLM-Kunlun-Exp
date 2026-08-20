@@ -17,6 +17,7 @@
 
 """kunlun custom op entry"""
 
+import os
 from typing import Optional
 
 import cocopod  # noqa
@@ -25,6 +26,7 @@ import xspeedgate_ops  # noqa
 from vllm.logger import init_logger
 from vllm.v1.worker.workspace import current_workspace_manager
 
+DISABLE_SMALL_MOE = os.environ.get("KUNLUN_DISABLE_SMALL_MOE", "0") == "1"
 logger = init_logger(__name__)
 
 try:
@@ -139,6 +141,18 @@ class KunlunOps:
             axis=-1,
             turn=True,
             out=out,
+        )
+
+    # Activation ops
+    @staticmethod
+    def swiglustep(out: torch.Tensor, x: torch.Tensor, limit: float):
+        """swiglustep"""
+        kunlun_ops.swiglustep(
+            x,
+            axis=-1,
+            turn=True,
+            out=out,
+            limit=limit,
         )
 
     # Activation ops
@@ -391,6 +405,8 @@ class KunlunOps:
         w2_bias: Optional[torch.Tensor] = None,
         scoring_func: str = "softmax",
         e_score_correction_bias: Optional[torch.Tensor] = None,
+        routed_scaling_factor: float = 1.0,
+        activation: str = "silu",
     ) -> torch.Tensor:
         """fused_moe"""
         global_num_experts, up_gate_size, _ = w1.shape
@@ -416,18 +432,33 @@ class KunlunOps:
                 normed_score=normed_score,
                 topk_index=topk_ids,
                 block_statistic=None,
-                stable=True,
+                stable=False,
             )
         elif scoring_func == "sigmoid":
+            if use_grouped_topk:
+                if num_expert_group is None or topk_group is None:
+                    raise ValueError("num_expert_group and topk_group must be set")
+                n_group = int(num_expert_group)
+                n_topk_group = int(topk_group)
+                if n_group <= 0 or n_topk_group <= 0:
+                    raise ValueError("num_expert_group and topk_group must be positive")
+                if n_topk_group > n_group:
+                    raise ValueError(
+                        "topk_group must be less than or equal to num_expert_group"
+                    )
+            else:
+                n_group = 1
+                n_topk_group = 1
+
             torch.ops._C.moe_sigmoid_group_topk_norm(
                 x=router_logits,
                 topk_index=topk_ids,
                 norm_score=normed_score,
                 block_static=block_statistic,
                 bias=e_score_correction_bias,
-                scale=1.0,
-                n_group=num_expert_group,
-                topk_group=topk_group,
+                scale=routed_scaling_factor,
+                n_group=n_group,
+                topk_group=n_topk_group,
             )
 
         if w1_bias is not None or w2_bias is not None:
@@ -475,25 +506,25 @@ class KunlunOps:
             #     attn_metadata = attn_metadata[prefix]
 
             # if attn_metadata is None or attn_metadata.num_prefills > 0 or :
-            # if M * moe_top_k < 400:
-            #     sorted_tokens_idx, sorted_tokens_num_lod, moe_expand = (
-            #         torch.ops.xspeedgate_ops.moe_pre_small(
-            #             topk_ids, global_num_experts, False, False, hidden_states
-            #         )
-            #     )
-            #     experts_num_lod = torch.ops.xspeedgate_ops.moe_active_expert_balance(
-            #         topk_ids, global_num_experts, False
-            #     )
-            #     out = torch.ops.xspeedgate_ops.fused_moe(
-            #         hidden_states,
-            #         w1,
-            #         w2,
-            #         normed_score.to(hidden_states.dtype),
-            #         sorted_tokens_num_lod,
-            #         sorted_tokens_idx,
-            #         experts_num_lod,
-            #     )
-            #     return out.sum(1)
+            if M * moe_top_k < 400 and not DISABLE_SMALL_MOE:
+                sorted_tokens_idx, sorted_tokens_num_lod, moe_expand = (
+                    torch.ops.xspeedgate_ops.moe_pre_small(
+                        topk_ids, global_num_experts, False, False, hidden_states
+                    )
+                )
+                experts_num_lod = torch.ops.xspeedgate_ops.moe_active_expert_balance(
+                    topk_ids, global_num_experts, False
+                )
+                out = torch.ops.xspeedgate_ops.fused_moe(
+                    hidden_states,
+                    w1,
+                    w2,
+                    normed_score.to(hidden_states.dtype),
+                    sorted_tokens_num_lod,
+                    sorted_tokens_idx,
+                    experts_num_lod,
+                )
+                return out.sum(1)
 
             # Allocate two shared workspaces for the large temporary buffers
             # used by the preprocess, W1, activation, and W2 stages.
@@ -502,21 +533,26 @@ class KunlunOps:
             out1_numel = M * moe_top_k * (w1.shape[1] // 2)
             moe_expand_numel = M * moe_top_k * N
 
-            # NOTE(2026-XX): the fused `moe_fc(act="SWISH_GLU")` kernel
-            # produces incorrect output across all M >= 1024 (verified by
-            # standalone repro: kernel rel-err ~2000% vs fp32 reference,
-            # while `moe_fc(act=None) + silu_and_mul` matches reference at
-            # bf16 precision floor). This was the source of the multi-
-            # concurrent "garbled output" symptom: concurrent requests
-            # batch up to M >= 1024 and hit the broken fused path. Until
-            # the kernel team fixes SWISH_GLU, always use the act=None +
-            # explicit silu_and_mul path. Repro: .comate/test_fused_moe_compare.py
-            #
-            # Live ranges (act=None path, all M):
-            #   workspace_a: (moe_expand if M*top_k > 768) -> out1
-            #   workspace_b: y -> out
-            workspace_a_numel = max(out1_numel, out_numel)
-            workspace_b_numel = max(y_numel, out_numel)
+            # Live ranges:
+            #   M * moe_top_k <= 768, M >= 1024:
+            #     workspace_a: out
+            #     workspace_b: y
+            #   M * moe_top_k <= 768, M < 1024:
+            #     workspace_a: out1
+            #     workspace_b: y -> out
+            #   M * moe_top_k > 768, M >= 1024:
+            #     workspace_a: moe_expand -> out
+            #     workspace_b: y
+            #   M * moe_top_k > 768, M < 1024:
+            #     workspace_a: moe_expand -> out1
+            #     workspace_b: y -> out
+            workspace_a_numel = out_numel
+            workspace_b_numel = y_numel
+
+            if M < 1024 or activation == "swiglustep":
+                workspace_a_numel = out1_numel
+                workspace_b_numel = max(y_numel, out_numel)
+
             if M * moe_top_k > 768:
                 workspace_a_numel = max(workspace_a_numel, moe_expand_numel)
 
@@ -569,26 +605,42 @@ class KunlunOps:
             moe_expand = moe_expand.reshape(M * moe_top_k, hidden_dim)
             y = workspace_b[:y_numel].view(M, moe_top_k, w1.shape[1])
 
-            # W1 GEMM (no fused activation; the fused SWISH_GLU kernel is
-            # buggy at large M -- see note above).
-            torch.ops._C.moe_fc(
-                x=moe_expand,
-                weight=w1,
-                sorted_tokens_num_lod=sorted_tokens_num_lod,
-                sorted_tokens_idx=sorted_tokens_idx,
-                moe_topk=moe_top_k,
-                y=y,
-                topk_ids=topk_ids,
-                act=None,
-            )
-            # Reuse `workspace_a` for `out1` after `moe_expand` is no longer
-            # needed.
-            out1 = workspace_a[:out1_numel].view(M, moe_top_k, w1.shape[1] // 2)
-            torch.ops._C.silu_and_mul(out1, y)
-            out1 = out1.reshape(-1, out1.shape[-1])
-            # Reuse `workspace_b` for `out` after `y` has been consumed by
-            # the activation.
-            out = workspace_b[:out_numel].view(M, moe_top_k, w2.shape[1])
+            if M < 1024 or activation == "swiglustep":
+                torch.ops._C.moe_fc(
+                    x=moe_expand,
+                    weight=w1,
+                    sorted_tokens_num_lod=sorted_tokens_num_lod,
+                    sorted_tokens_idx=sorted_tokens_idx,
+                    moe_topk=moe_top_k,
+                    y=y,
+                )
+                # Reuse `workspace_a` for `out1` after `moe_expand` is no longer
+                # needed.
+                out1 = workspace_a[:out1_numel].view(M, moe_top_k, w1.shape[1] // 2)
+                if activation == "swiglustep":
+                    torch.ops._C.swiglustep(out1, y)
+                else:
+                    torch.ops._C.silu_and_mul(out1, y)
+                out1 = out1.reshape(-1, out1.shape[-1])
+                # Reuse `workspace_b` for `out` after `y` has been consumed by
+                # the activation.
+                out = workspace_b[:out_numel].view(M, moe_top_k, w2.shape[1])
+            else:
+                torch.ops._C.moe_fc(
+                    x=moe_expand,
+                    weight=w1,
+                    sorted_tokens_num_lod=sorted_tokens_num_lod,
+                    sorted_tokens_idx=sorted_tokens_idx,
+                    moe_topk=moe_top_k,
+                    y=y,
+                    act="SWISH_GLU",
+                )
+
+                y = y[..., : y.shape[-1] // 2]
+                out1 = y.reshape(-1, y.shape[-1])
+                # Reuse `workspace_a` for `out` after `moe_expand` is no longer
+                # needed.
+                out = workspace_a[:out_numel].view(M, moe_top_k, w2.shape[1])
 
             dequant_scale = torch.ones(
                 (M, moe_top_k), dtype=torch.float32, device=hidden_states.device
@@ -601,8 +653,6 @@ class KunlunOps:
                 sorted_tokens_idx=sorted_tokens_idx,
                 moe_topk=moe_top_k,
                 y=out,
-                topk_ids=topk_ids,
-                act=None,
             )
 
             output = torch.empty(

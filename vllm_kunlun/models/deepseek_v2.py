@@ -56,6 +56,7 @@ from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mla import MLAModules, MultiHeadLatentAttention
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
+from vllm.model_executor.layers.shared_fused_moe import SharedFusedMoE
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -208,6 +209,7 @@ class DeepseekV2MoE(nn.Module):
                 top_k=config.num_experts_per_tok,
                 hidden_size=config.hidden_size,
                 intermediate_size=config.moe_intermediate_size,
+                reduce_results=False,
                 renormalize=config.norm_topk_prob,
                 quant_config=quant_config,
                 use_grouped_topk=True,
@@ -236,12 +238,13 @@ class DeepseekV2MoE(nn.Module):
                 prefix=f"{prefix}.shared_experts",
             )
 
-            self.experts = FusedMoE(
+            self.experts = SharedFusedMoE(
                 shared_experts=self.shared_experts,
                 num_experts=config.n_routed_experts,
                 top_k=config.num_experts_per_tok,
                 hidden_size=config.hidden_size,
                 intermediate_size=config.moe_intermediate_size,
+                reduce_results=False,
                 renormalize=config.norm_topk_prob,
                 quant_config=quant_config,
                 use_grouped_topk=True,

@@ -19,8 +19,10 @@
 from typing import Optional
 
 import torch
-from vllm.model_executor.kernels.linear import _POSSIBLE_KERNELS, ExllamaLinearKernel
-from vllm.platforms import PlatformEnum
+from vllm.model_executor.layers.quantization.kernels.mixed_precision import (
+    _POSSIBLE_KERNELS,
+    ExllamaLinearKernel,
+)
 
 
 class KunlunExllamaLinearKernel(ExllamaLinearKernel):
@@ -49,5 +51,6 @@ class KunlunExllamaLinearKernel(ExllamaLinearKernel):
         return output.reshape(out_shape)
 
 
-# register KunlunExllamaLinearKernel for the OOT platform
-_POSSIBLE_KERNELS[PlatformEnum.OOT] = [KunlunExllamaLinearKernel]
+# remove ExllamaLinearKernel and add KunlunExllamaLinearKernel
+_POSSIBLE_KERNELS.remove(ExllamaLinearKernel)
+_POSSIBLE_KERNELS.append(KunlunExllamaLinearKernel)

@@ -830,15 +830,16 @@ class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
 class Gemma4MultimodalEmbedder(nn.Module):
     """Projects vision/audio soft tokens into LM embedding space.
 
-    Architecture:
-        inputs_embeds → embedding_projection → embedding_post_projection_norm
+    Architecture (matches HF transformers Gemma4MultimodalEmbedder):
+        inputs_embeds → embedding_pre_projection_norm → embedding_projection
 
     Unlike Gemma3n which has separate hard/soft embedding paths with
     per-path normalization and a learned embedding table, Gemma4 uses a
-    simplified 2-layer design: a linear projection followed by RMSNorm
-    (without learnable scale).  The checkpoint confirms this — only
+    simplified 2-layer design: an RMSNorm (without learnable scale) applied
+    to the multimodal-tower output *before* the linear projection into LM
+    space.  The checkpoint confirms this — only
     ``embedding_projection.weight`` exists; there is no embedding table
-    or pre-projection norm weights.
+    or norm weights (the norm has no learnable scale).
     """
 
     def __init__(
@@ -864,16 +865,49 @@ class Gemma4MultimodalEmbedder(nn.Module):
             bias=False,
         )
 
-        self.embedding_post_projection_norm = RMSNorm(
-            self.text_hidden_size,
+        # NOTE (precision fix): RMSNorm must operate on the multimodal-tower
+        # output (dimension = embedding_dim) BEFORE the projection, to match
+        # the HF reference:
+        #   embs_normed = self.embedding_pre_projection_norm(inputs_embeds)
+        #   return self.embedding_projection(embs_normed)
+        # The previous implementation applied the norm AFTER the projection and
+        # over the wrong dimension (text_hidden_size), which shifted the image
+        # soft-token embeddings off their trained distribution and degraded
+        # vision precision. The norm has no learnable scale (has_weight=False),
+        # consistent with the checkpoint having no norm weights.
+        self.embedding_pre_projection_norm = RMSNorm(
+            embedding_dim,
             eps=self.eps,
             has_weight=False,
         )
 
     def forward(self, inputs_embeds: torch.Tensor) -> torch.Tensor:
         """Project soft tokens from a multimodal tower into LM space."""
-        embs_proj, _ = self.embedding_projection(inputs_embeds)
-        return self.embedding_post_projection_norm(embs_proj)
+        if inputs_embeds.dtype == torch.float16:
+            inputs_embeds = inputs_embeds.clamp(-64000.0, 64000.0)
+
+        # NOTE (precision fix): apply RMSNorm BEFORE the projection (matching
+        # HF), not after. We run the norm in fp32 for numerical stability
+        # (the kunlun RMSNorm up-casts internally anyway), then cast back.
+        orig_dtype = inputs_embeds.dtype
+        embs_normed = self.embedding_pre_projection_norm(inputs_embeds)
+        embs_normed = embs_normed.to(orig_dtype)
+
+        if orig_dtype == torch.float16:
+            # Manual fp32 matmul to avoid modifying module state (not thread-safe
+            # for TP). Cast inputs and weights to fp32, compute in fp32, cast back.
+            weight = self.embedding_projection.weight.to(torch.float32)
+            bias = (
+                self.embedding_projection.bias.to(torch.float32)
+                if self.embedding_projection.bias is not None
+                else None
+            )
+            inputs_fp32 = embs_normed.to(torch.float32)
+            embs_proj = torch.nn.functional.linear(inputs_fp32, weight, bias)
+            embs_proj = embs_proj.to(orig_dtype)
+        else:
+            embs_proj, _ = self.embedding_projection(embs_normed)
+        return embs_proj
 
 
 # ---------------------------------------------------------------------------
@@ -1346,9 +1380,19 @@ class Gemma4ForConditionalGeneration(
         ignore_prefixes = [
             "embed_vision.embedding.",
             "embed_audio.embedding.",
-            "vision_tower.std_bias",
+            # NOTE (precision fix): `vision_tower.std_bias` / `std_scale` were
+            # previously listed here, which caused them to be DROPPED during
+            # weight loading. But Gemma4's vision tower runs a `standardize`
+            # step `(hidden - std_bias) * std_scale` after the pooler when
+            # `vision_config.standardize == True` (it is True for this model).
+            # The checkpoint ships trained std_bias (mean ~ -36.5, range up to
+            # +/-5e4) and std_scale (mean ~0.0013). Dropping them leaves the
+            # buffers at their 0/1 defaults, which destroys every vision hidden
+            # state and is the root cause of the poor OCR/precision results.
+            # They are now loaded explicitly below via _route_clip_buffers and
+            # must NOT be ignored. (mean_bias is never registered by HF, so it
+            # stays ignored for safety on checkpoints that ship it.)
             "vision_tower.mean_bias",
-            "vision_tower.std_scale",
         ]
         # Models without audio tower should skip
         # audio weights entirely.
@@ -1371,8 +1415,38 @@ class Gemma4ForConditionalGeneration(
             ".output_min",
         )
 
+        # NOTE (precision fix): vision tower standardization buffers.
+        # `vision_tower.std_bias` and `vision_tower.std_scale` are registered
+        # via register_buffer (NOT parameters), so AutoWeightsLoader cannot
+        # place them (its non-param handling only covers BatchNorm stats). We
+        # intercept them here and copy directly into the vision_tower buffers,
+        # exactly like the clip-buffer handling below. Without this the
+        # standardize path uses untrained 0/1 values and corrupts features.
+        #
+        # The weights arrive here with the ORIGINAL checkpoint name (the
+        # hf_to_vllm_mapper that strips the `model.` prefix is applied later,
+        # inside AutoWeightsLoader, after this generator runs). The checkpoint
+        # name is therefore `model.vision_tower.std_bias` / `...std_scale`,
+        # so we match by suffix (like the clip buffers) rather than exact name.
+        std_buffer_suffixes = (".std_bias", ".std_scale")
+
         def _route_clip_buffers(ws):
             for name, tensor in ws:
+                if name.endswith(std_buffer_suffixes):
+                    # Only the vision_tower top-level buffers need loading;
+                    # ignore any other std_bias/std_scale that may exist.
+                    if name.endswith(
+                        ("vision_tower.std_bias", "vision_tower.std_scale")
+                    ):
+                        # Load the trained standardize buffers into the vision
+                        # tower. self.vision_tower is an HF Gemma4VisionModel
+                        # whose forward applies (hidden - std_bias) * std_scale.
+                        buf_name = name.split(".")[-1]  # 'std_bias' or 'std_scale'
+                        vt = getattr(self, "vision_tower", None)
+                        if vt is not None and hasattr(vt, buf_name):
+                            buf = getattr(vt, buf_name)
+                            buf.data.copy_(tensor.to(buf.device, buf.dtype))
+                    continue
                 if name.endswith(clip_suffixes):
                     # Resolve module by hierarchical name, e.g.
                     # audio_tower.layers.0.feed_forward1.ffw_layer_1.input_max

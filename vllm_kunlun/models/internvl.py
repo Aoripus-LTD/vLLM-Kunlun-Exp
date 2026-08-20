@@ -21,7 +21,7 @@ from PIL import Image
 from transformers import BatchEncoding, PretrainedConfig, TensorType
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.quantization.auto_awq import AutoAWQConfig as AWQConfig
+from vllm.model_executor.layers.quantization.awq import AWQConfig
 from vllm.model_executor.models.interfaces import (
     MultiModalEmbeddings,
     SupportsLoRA,
@@ -63,7 +63,7 @@ from vllm.multimodal.processing import (
 )
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
-from vllm.tokenizers import TokenizerLike as AnyTokenizer
+from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils import set_default_torch_num_threads
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 

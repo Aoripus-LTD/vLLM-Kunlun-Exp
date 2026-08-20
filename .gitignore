@@ -23,3 +23,4 @@ qwen_docs/site/.venv/
 # 内部文档与脚本（绝不入库）
 README.INT.md
 qwen38-deploy/_internal/
+Internal/

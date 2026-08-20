@@ -5,6 +5,9 @@ from typing import List, Optional
 import torch
 import torch.nn.functional as F
 from torch.library import custom_op
+from vllm.attention import Attention as VllmAttention
+from vllm.attention import AttentionType
+from vllm.attention.layer import MultiHeadAttention as VllmMultiHeadAttention
 from vllm.config import CacheConfig
 from vllm.distributed.kv_transfer import (
     get_kv_transfer_group,
@@ -12,13 +15,8 @@ from vllm.distributed.kv_transfer import (
     is_v1_kv_transfer_group,
 )
 from vllm.forward_context import ForwardContext, get_forward_context
-from vllm.model_executor.layers.attention import Attention as VllmAttention
-from vllm.model_executor.layers.attention.mm_encoder_attention import (
-    MMEncoderAttention as VllmMultiHeadAttention,
-)
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 from vllm.platforms import _Backend
-from vllm.v1.attention.backend import AttentionType
 
 
 class Attention(VllmAttention):
@@ -96,7 +94,7 @@ class Attention(VllmAttention):
                 attn_metadata = forward_context.attn_metadata
                 if isinstance(attn_metadata, dict):
                     attn_metadata = attn_metadata[self.layer_name]
-                self_kv_cache = self.kv_cache
+                self_kv_cache = self.kv_cache[forward_context.virtual_engine]
                 self.impl.forward(
                     self, query, key, value, self_kv_cache, attn_metadata, output=output
                 )
@@ -111,7 +109,7 @@ class Attention(VllmAttention):
                 attn_metadata = forward_context.attn_metadata
                 if isinstance(attn_metadata, dict):
                     attn_metadata = attn_metadata[self.layer_name]
-                self_kv_cache = self.kv_cache
+                self_kv_cache = self.kv_cache[forward_context.virtual_engine]
                 return self.impl.forward(
                     self, query, key, value, self_kv_cache, attn_metadata
                 )
@@ -229,7 +227,7 @@ def unified_attention_with_output_kunlun(
     if isinstance(attn_metadata, dict):
         attn_metadata = attn_metadata[layer_name]
     self = forward_context.no_compile_layers[layer_name]
-    kv_cache = self.kv_cache
+    kv_cache = self.kv_cache[forward_context.virtual_engine]
     self.impl.forward(self, query, key, value, kv_cache, attn_metadata, output=output)
 
     maybe_save_kv_layer_to_connector(layer_name, kv_cache)
@@ -265,7 +263,7 @@ def unified_attention(
     if isinstance(attn_metadata, dict):
         attn_metadata = attn_metadata[layer_name]
     self = forward_context.no_compile_layers[layer_name]
-    kv_cache = self.kv_cache
+    kv_cache = self.kv_cache[forward_context.virtual_engine]
     output = self.impl.forward(self, query, key, value, kv_cache, attn_metadata)
 
     maybe_save_kv_layer_to_connector(layer_name, kv_cache)

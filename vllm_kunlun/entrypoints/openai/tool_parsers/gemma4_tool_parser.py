@@ -28,8 +28,8 @@ from vllm.entrypoints.openai.engine.protocol import (
     ToolCall,
 )
 from vllm.logger import init_logger
-from vllm.tokenizers import TokenizerLike as AnyTokenizer
 from vllm.tool_parsers.abstract_tool_parser import ToolParser
+from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils import random_uuid
 
 logger = init_logger(__name__)
