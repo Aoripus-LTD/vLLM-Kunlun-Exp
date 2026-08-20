@@ -342,6 +342,26 @@ _register_post_import_hook(
 )
 
 
+# --- hook 7: SiluAndMul OOT registration ------------------------------------
+# Import the activation module so its CustomOp.register_oot decorator runs.
+# This cannot be a top-level import here: it would pull in
+# ``vllm.model_executor.layers.*`` while the platform plugin is still
+# registering. The import also activates the other OOT registrations in the
+# ``vllm_kunlun.ops`` package.
+def _activation_applied(mod):
+    cls = getattr(mod, "SiluAndMul", None)
+    return cls is None or "vllm_kunlun.ops.activation" in sys.modules
+
+
+def _activation_apply(mod):
+    import vllm_kunlun.ops.activation  # noqa: F401  (self-applies on import)
+
+
+_register_post_import_hook(
+    "vllm.model_executor.layers.activation", _activation_applied, _activation_apply
+)
+
+
 def _preload_mapped(full_name):
     """Load the kunlun replacement for ``full_name`` into sys.modules."""
     if full_name in sys.modules:
