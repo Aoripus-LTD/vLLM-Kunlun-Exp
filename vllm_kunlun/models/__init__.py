@@ -62,7 +62,3 @@ def register_model():
         "Gemma4ForConditionalGeneration",
         "vllm_kunlun.models.gemma4_mm:Gemma4ForConditionalGeneration",
     )
-
-
-def register_quant_method():
-    """to do"""
