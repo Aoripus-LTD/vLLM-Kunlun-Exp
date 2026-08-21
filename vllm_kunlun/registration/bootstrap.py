@@ -27,10 +27,15 @@ from types import ModuleType
 _CUDA_EXTENSION_MODULES = ("vllm._C", "vllm._moe_C")
 _CUSTOM_OPS_PRIVATE_NAME = "_vllm_kunlun_custom_ops_registration"
 _CUSTOM_OPS_CANONICAL_NAME = "vllm_kunlun.ops._custom_ops"
+_CUSTOM_OPS_REGISTRATION_ERROR: BaseException | None = None
 _SPEC_DECODE_COMPAT_MODULES = (
     "vllm_kunlun.v1.sample.spec_decode.dflash",
     "vllm_kunlun.v1.sample.spec_decode.eagle",
 )
+
+
+class CustomOpsRegistrationError(RuntimeError):
+    """A custom-op registration failure that cannot be retried in-process."""
 
 
 def stub_vllm_cuda_extensions() -> None:
@@ -58,6 +63,14 @@ def _load_custom_ops_module() -> ModuleType:
     (an error), so if the canonical package import happened first, both
     names are pointed at that same module instead of executing it again.
     """
+    global _CUSTOM_OPS_REGISTRATION_ERROR
+
+    if _CUSTOM_OPS_REGISTRATION_ERROR is not None:
+        raise CustomOpsRegistrationError(
+            "Kunlun custom-op registration previously failed; "
+            "retry in a fresh process"
+        ) from _CUSTOM_OPS_REGISTRATION_ERROR
+
     package_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     ops_file = os.path.join(package_root, "ops", "_custom_ops.py")
 
@@ -79,10 +92,15 @@ def _load_custom_ops_module() -> ModuleType:
     sys.modules[_CUSTOM_OPS_PRIVATE_NAME] = module
     try:
         spec.loader.exec_module(module)
-    except Exception:
-        # Leave no half-initialized module behind; a retry should start clean.
+    except Exception as error:
+        # Torch dispatcher registrations are not rolled back with the module.
+        # Mark this stage as non-retryable instead of re-executing the file.
+        _CUSTOM_OPS_REGISTRATION_ERROR = CustomOpsRegistrationError(
+            "Kunlun custom-op registration partially completed and cannot "
+            "be retried in this process"
+        )
         sys.modules.pop(_CUSTOM_OPS_PRIVATE_NAME, None)
-        raise
+        raise _CUSTOM_OPS_REGISTRATION_ERROR from error
     return module
 
 

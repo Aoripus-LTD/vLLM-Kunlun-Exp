@@ -77,7 +77,8 @@ uv pip install vllm==|pip_vllm_version| --no-build-isolation --no-deps
 ```
 
 ### Build and Install
-Navigate to the vllm-kunlun directory and build the package:
+Navigate to the vllm-kunlun directory and install the package. This builds the
+native `_kunlun` extension during installation:
 
 ```{code-block} bash
 :substitutions:
@@ -89,10 +90,7 @@ cd vLLM-Kunlun
 git checkout |vllm_kunlun_version|
 
 uv pip install -r requirements.txt
-
-python setup.py build
-
-python setup.py install
+uv pip install --no-build-isolation --no-deps .
 ```
 
 ### Replace eval_frame.py

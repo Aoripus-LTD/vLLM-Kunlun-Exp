@@ -16,6 +16,7 @@ from .registration.import_hooks import dispatch_hooks, install_import_hook
 # Platform discovery can call register() more than once in the same process,
 # including re-entrantly while the first call is importing vLLM modules.
 _REGISTER_STATE = "idle"
+_REGISTER_ERROR: BaseException | None = None
 _KUNLUN_PLATFORM = "vllm_kunlun.platforms.kunlun.KunlunPlatform"
 
 
@@ -61,7 +62,11 @@ def _run_startup_stages(logger: logging.Logger) -> None:
 
 def register() -> str:
     """Register the Kunlun platform and its compatibility patches."""
-    global _REGISTER_STATE
+    global _REGISTER_ERROR, _REGISTER_STATE
+    if _REGISTER_STATE == "failed":
+        raise RuntimeError(
+            "Kunlun plugin registration previously failed; " "retry in a fresh process"
+        ) from _REGISTER_ERROR
     if _REGISTER_STATE != "idle":
         logging.getLogger("vllm_kunlun").debug(
             "[KunlunPlugin] register() skipped; state=%s", _REGISTER_STATE
@@ -73,9 +78,12 @@ def register() -> str:
     logger.info("[KunlunPlugin] register() pid=%s", os.getpid())
     try:
         _run_startup_stages(logger)
-    except Exception:
-        # Every stage is idempotent, so a later discovery attempt may retry.
-        _REGISTER_STATE = "idle"
+    except Exception as error:
+        if isinstance(error, bootstrap.CustomOpsRegistrationError):
+            _REGISTER_ERROR = error
+            _REGISTER_STATE = "failed"
+        else:
+            _REGISTER_STATE = "idle"
         logger.exception("[KunlunPlugin] register() failed")
         raise
     _REGISTER_STATE = "registered"

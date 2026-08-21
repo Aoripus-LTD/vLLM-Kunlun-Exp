@@ -23,6 +23,7 @@ from vllm.model_executor.layers.activation import SiluAndMul
 
 @CustomOp.register_oot(name="SiluAndMul")
 class KunlunSiluAndMul(SiluAndMul):
+    """Kunlun-optimized SiluAndMul registered through vLLM's OOT mechanism."""
 
     def forward_oot(self, x: torch.Tensor) -> torch.Tensor:
         d = x.shape[-1] // 2
