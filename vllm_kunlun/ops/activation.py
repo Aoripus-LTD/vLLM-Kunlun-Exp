@@ -16,29 +16,14 @@
 # limitations under the License.
 # This file is a part of the vllm-kunlun project.
 
-import logging
-
 import torch
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.activation import SiluAndMul
-
-logger = logging.getLogger("vllm_kunlun")
-
-_oot_silu_and_mul_init_logged = False
 
 
 @CustomOp.register_oot(name="SiluAndMul")
 class KunlunSiluAndMul(SiluAndMul):
     """Kunlun-optimized SiluAndMul registered through vLLM's OOT mechanism."""
-
-    def __init__(self, *args, **kwargs):
-        global _oot_silu_and_mul_init_logged
-        super().__init__(*args, **kwargs)
-        if not _oot_silu_and_mul_init_logged:
-            logger.info(
-                "[KunlunOOT] KunlunSiluAndMul.__init__ called (OOT instantiation)"
-            )
-            _oot_silu_and_mul_init_logged = True
 
     def forward_oot(self, x: torch.Tensor) -> torch.Tensor:
         d = x.shape[-1] // 2
@@ -46,6 +31,3 @@ class KunlunSiluAndMul(SiluAndMul):
         out = torch.empty(output_shape, dtype=x.dtype, device=x.device)
         torch.ops._C.silu_and_mul(out, x)
         return out
-
-
-logger.info("[KunlunOOT] Registered KunlunSiluAndMul via CustomOp.register_oot")
