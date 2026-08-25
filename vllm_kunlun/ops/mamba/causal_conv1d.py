@@ -354,49 +354,25 @@ def causal_conv1d_update(
         out = out.squeeze(1)
         return out
     else:
-        # 用 non-spec kernel 分两步模拟 spec 语义（PR #423 语义）：
-        # base 推进 state → draft 用 base 后的 state 推进 → 不回滚
-        # （draft 的推进由 vllm update_states 根据接受数回滚，勿在此回滚）
-        n_spec, seq_spec, d_spec = x.shape
-        stride = conv_state.stride(0)
-
-        x_base = x[:, 0, :].contiguous().unsqueeze(1)  # (n, 1, dim)
-        x_draft = x[:, 1, :].contiguous().unsqueeze(1)  # (n, 1, dim)
-
-        out_base = torch.empty_like(x_base)
-        kunlun_ops.causal_conv1d_update(
-            x_base,
-            weight,
-            out_base,
-            conv_state,
-            None,
-            bias,
-            conv_state_indices_cpu=conv_state_indices_cpu,
-            conv_state_indices_xpu=conv_state_indices,
-            act="SWISH",
-            state_seq_stride=stride,
-            is_ncw=False,
-        )
-
-        out_draft = torch.empty_like(x_draft)
-        kunlun_ops.causal_conv1d_update(
-            x_draft,
-            weight,
-            out_draft,
-            conv_state,
-            None,
-            bias,
-            conv_state_indices_cpu=conv_state_indices_cpu,
-            conv_state_indices_xpu=conv_state_indices,
-            act="SWISH",
-            state_seq_stride=stride,
-            is_ncw=False,
-        )
-
+        # 0.1.122 官方 spec kernel：一次调用处理 padded 的
+        # (n_spec, seq_spec, dim)，kernel 依据 num_accepted_tokens
+        # 决定每个请求的推进语义（0.1.58 的 spec 分支会 illegal
+        # memory access，0.1.122 已修复）。
         out = torch.empty_like(x)
-        out[:, 0, :] = out_base.squeeze(1)
-        out[:, 1, :] = out_draft.squeeze(1)
-        return _unpad_spec_hidden_states(
-            out.view(n_spec, seq_spec, d_spec),
-            spec_lengths,
+        stride = conv_state.stride(0)
+        kunlun_ops.causal_conv1d_update(
+            x,
+            weight,
+            out,
+            conv_state,
+            None,
+            bias,
+            conv_state_indices_cpu=conv_state_indices_cpu,
+            conv_state_indices_xpu=conv_state_indices,
+            num_accepted_tokens_cpu=num_accepted_tokens_cpu,
+            num_accepted_tokens_xpu=num_accepted_tokens.to(torch.int32),
+            act="SWISH",
+            state_seq_stride=stride,
+            is_ncw=False,
         )
+        return _unpad_spec_hidden_states(out, spec_lengths)
