@@ -8,6 +8,7 @@ from typing import Optional, Union
 
 import kunlun_ops
 import torch
+import torch.nn.functional as F
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 
 
@@ -71,6 +72,78 @@ def causal_conv1d_fn(
     )
 
     return out
+
+
+def torch_causal_conv1d_update_spec(
+    hidden_states,
+    conv_state,
+    weight,
+    bias=None,
+    activation=None,
+    conv_state_indices=None,
+    num_accepted_tokens=None,
+):
+    """CUDA/XPU-graph-safe pure-torch reference for the spec (MTP) conv update.
+
+    Ported from baidu/vLLM-Kunlun PR #423. Replaces the kunlun_ops 0.1.58
+    spec kernel (which raises illegal memory access) with pure torch ops.
+
+    hidden_states: (batch, seq_len, dim)
+    conv_state:    (num_cache_lines, state_len, dim)  [is_ncw=False layout]
+    weight:        (dim, width), bias: (dim,)
+
+    ``num_accepted_tokens`` is only ever used to build *gather indices* and a
+    *mask* -- never a Python slice bound, an ``if`` condition or a tensor
+    shape. Every shape below is a function of (batch, seq_len, dim, width)
+    only, so the traced graph stays valid for any accepted-token count and
+    there is no device->host sync.
+    """
+    batch, seq_len, dim = hidden_states.shape
+    state_len = conv_state.shape[-2]
+    width = weight.shape[-1]
+    # The caller guarantees a sliding window that exactly fits the cache slot
+    # (state_len == conv_kernel_size - 1 + num_spec, seq_len == num_spec + 1).
+    assert state_len == width - 2 + seq_len, (
+        f"spec conv expects state_len == width - 2 + seq_len, got "
+        f"state_len={state_len}, width={width}, seq_len={seq_len}"
+    )
+
+    idx = conv_state_indices.long()
+    # Read the selected cache lines *before* the write-back below.
+    hist = conv_state.index_select(0, idx)  # (batch, state_len, dim)
+
+    # Request i has ``2 + accepted_i`` valid history rows, so the ``width - 1``
+    # rows the convolution needs start at ``2 + accepted_i - (width - 1)``.
+    # Negative rows lie outside the history -- only reachable on the
+    # dummy/warmup run where accepted can be 0. They are clamped for the gather
+    # and then zeroed by ``row_ok``, which reproduces the zero-padded history of
+    # the community Triton kernel (it reads history through a bounded mask).
+    rows = num_accepted_tokens.long().view(batch, 1) + (3 - width)
+    rows = rows + torch.arange(width - 1, device=hidden_states.device).view(1, -1)
+    row_ok = (rows >= 0) & (rows < state_len)
+    rows = rows.clamp_(0, state_len - 1)
+    hist_tail = hist.gather(1, rows.unsqueeze(-1).expand(batch, width - 1, dim))
+    hist_tail = hist_tail * row_ok.unsqueeze(-1).to(hist_tail.dtype)
+
+    # (batch, width - 1 + seq_len, dim): history tail followed by the new
+    # tokens. Output token j is the conv over the fixed window [j, j + width).
+    stream = torch.cat([hist_tail, hidden_states], dim=1).to(weight.dtype)
+
+    out = F.conv1d(
+        stream.transpose(1, 2).contiguous(),
+        weight.unsqueeze(1),
+        bias.to(weight.dtype) if bias is not None else None,
+        padding=0,
+        groups=dim,
+    )  # (batch, dim, seq_len)
+    # Unconditional silu, matching the previous reference and the GDN caller,
+    # which always requests silu.
+    out = F.silu(out).transpose(1, 2).to(hidden_states.dtype)
+
+    # Slide the cache window: drop the oldest row of the stream, keeping the
+    # newest ``state_len`` rows.
+    conv_state.index_copy_(0, idx, stream[:, 1:, :].to(conv_state.dtype).contiguous())
+    return out.reshape(-1, dim)
 
 
 def causal_conv1d_update_spec_graphsafe(
@@ -281,17 +354,49 @@ def causal_conv1d_update(
         out = out.squeeze(1)
         return out
     else:
-        out = causal_conv1d_update_spec_graphsafe(
-            x,
-            conv_state,
+        # 用 non-spec kernel 分两步模拟 spec 语义（PR #423 语义）：
+        # base 推进 state → draft 用 base 后的 state 推进 → 不回滚
+        # （draft 的推进由 vllm update_states 根据接受数回滚，勿在此回滚）
+        n_spec, seq_spec, d_spec = x.shape
+        stride = conv_state.stride(0)
+
+        x_base = x[:, 0, :].contiguous().unsqueeze(1)  # (n, 1, dim)
+        x_draft = x[:, 1, :].contiguous().unsqueeze(1)  # (n, 1, dim)
+
+        out_base = torch.empty_like(x_base)
+        kunlun_ops.causal_conv1d_update(
+            x_base,
             weight,
+            out_base,
+            conv_state,
+            None,
             bias,
-            conv_state_indices=conv_state_indices,
             conv_state_indices_cpu=conv_state_indices_cpu,
-            num_accepted_tokens=num_accepted_tokens,
-            num_accepted_tokens_cpu=num_accepted_tokens_cpu,
+            conv_state_indices_xpu=conv_state_indices,
+            act="SWISH",
+            state_seq_stride=stride,
+            is_ncw=False,
         )
+
+        out_draft = torch.empty_like(x_draft)
+        kunlun_ops.causal_conv1d_update(
+            x_draft,
+            weight,
+            out_draft,
+            conv_state,
+            None,
+            bias,
+            conv_state_indices_cpu=conv_state_indices_cpu,
+            conv_state_indices_xpu=conv_state_indices,
+            act="SWISH",
+            state_seq_stride=stride,
+            is_ncw=False,
+        )
+
+        out = torch.empty_like(x)
+        out[:, 0, :] = out_base.squeeze(1)
+        out[:, 1, :] = out_draft.squeeze(1)
         return _unpad_spec_hidden_states(
-            out.view(x.shape[0], x.shape[1], dim),
+            out.view(n_spec, seq_spec, d_spec),
             spec_lengths,
         )
