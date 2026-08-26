@@ -68,11 +68,15 @@ VLLM_HOST_IP=$(hostname -i)          # 分布式通信 IP
 VLLM_USE_V1=1                        # V1 引擎
 USE_ORI_ROPE=1                       # Qwen3 融合大算子开关
 XMLIR_DYNAMO_WORKAROUND=1            # xmlir 1.0.0.1 必需（torch.compile 兼容）
+XPU_SET_RECURRENT_GATED_DELTA_RULE_FWDV2_FP16_FAST_OPT=3  # 全 FP16 recurrent 加速（1/2/3，建议 3）
 ```
 
 > `XMLIR_DYNAMO_WORKAROUND=1` 为 xmlir 1.0.0.1 升级后新增：其 `torch_xmlir/nn/linear.py`
 > 的 hydra linear 路径使用 `make_tensors_stateful` contextmanager，torch.compile 会报
 > Unsupported；开启该开关后 linear 走 `torch.ops._dynamo_workaround.linear` 才可编译。
+>
+> `XPU_SET_RECURRENT_GATED_DELTA_RULE_FWDV2_FP16_FAST_OPT=3` 为 kunlun_ops 0.1.122
+> 的 recurrent 全 FP16 加速开关：Dense 256 并发 +2~4%，**MTP 256 并发 +9%**。
 
 ## MTP 投机解码启动
 

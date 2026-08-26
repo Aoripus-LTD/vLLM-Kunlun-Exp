@@ -180,12 +180,12 @@ prompt 172 + output 256）：
 | 形态 | 单流 overall | 256 并发 overall |
 |---|---|---|
 | Dense（0.1.58 栈） | 57 tok/s | 1542 tok/s |
-| Dense（0.1.122 栈） | 52 tok/s | **1552 tok/s** |
-| **MTP（0.1.122 栈）** | **55-62 tok/s** | 1482 tok/s |
+| Dense（0.1.122 栈 + fast_opt） | 52-57 tok/s | **1579-1619 tok/s** |
+| **MTP（0.1.122 栈 + fast_opt）** | **55-59 tok/s** | **1609-1622 tok/s** |
 
-- MTP（`num_speculative_tokens=1, method=mtp`）Mean acceptance length **1.83**，
-  单流首次反超 Dense（+9%）；高并发下 draft 计算与验证争抢算力，比 Dense 略低
-  （-4.5%），生产形态按负载特征选择
+- MTP（`num_speculative_tokens=1, method=mtp`）Mean acceptance length **1.83**；
+  配合 `XPU_SET_RECURRENT_GATED_DELTA_RULE_FWDV2_FP16_FAST_OPT=3` 官方全 FP16
+  加速开关后，256 并发追平 Dense、单流反超——**当前最优生产组合**
 - MTP 与 mamba prefix-caching 不可共存（vllm 0.15.1 限制）
 
 ### 带宽预算（27B W8A8，权重约 31GB，I8 24G + F16 7G）

@@ -92,14 +92,21 @@ XMLIR_FORCE_USE_XPU_GRAPH=1、VLLM_HOST_IP=$(hostname -i)、USE_ORI_ROPE=1、
   | 形态 | 单流 | 8 并发 | 32 并发 | 256 并发 |
   |---|---|---|---|---|
   | Dense（0.1.58 栈） | 57 | 220 | 665 | 1542 |
-  | Dense（0.1.122 栈） | 52 | — | — | **1552** |
-  | **MTP（0.1.122 栈）** | **55-62** | 246 | 709 | 1482 |
+  | Dense（0.1.122 栈 + fast_opt） | 52-57 | — | — | 1579-1619 |
+  | **MTP（0.1.122 栈 + fast_opt）** | **55-59** | 246 | 709 | **1609-1622** |
 
+- **FP16_FAST_OPT=3 官方开关**：`XPU_SET_RECURRENT_GATED_DELTA_RULE_FWDV2_FP16_FAST_OPT=3`
+  （kunlun_ops 0.1.122 fwdv2 recurrent 全 FP16 加速，1 负载优先/2 理论性能优先/3 自动）。
+  实测 Dense +2~4%；**MTP 256 并发 1482→1609-1622（+9%）**。已写入
+  start_serve.sh 与 start_serve_mtp.sh。**MTP + fast_opt=3 为当前最优生产组合**
 - **MTP 启动**：`start_serve_mtp.sh`（`--speculative-config '{"num_speculative_tokens": 1, "method": "mtp"}'`）；
   causal_conv1d spec 分支已切换为官方单次 kernel（commit e173c5e）
+- **GDN 深挖结论**：官方两个 recurrent 实现（kunlun_ops xfa / xspeedgate_ops）都已
+  实测（xspeedgate 版 1592，略低已回退）；torch 参考实现 batch=64 需 0.9ms/层，
+  kunlun 融合 kernel 快 2-3 倍——**官方栈内 GDN 已无大幅空间**，进一步削减需自研
+  ISA 级 kernel 或 DSpark
 - **剩余优化点**：MTP iteration 28-38ms（enforce-eager 下 layer0 计时：conv
-  0.45ms / recurrent 0.23ms / 输入投影 1.4ms），单流仍有约 2x 优化空间
-- **生产形态选择**：高并发负载用 Dense（新栈 1552 tok/s），单流敏感场景用 MTP
+  0.45ms / recurrent 0.23ms / 输入投影 1.4ms），conv kernel 或有独立优化空间
 
 ## 部署操作
 

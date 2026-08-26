@@ -61,13 +61,17 @@
 | 形态 | 单流 overall | 8 并发 | 32 并发 | 256 并发 |
 |---|---|---|---|---|
 | Dense（0.1.58 栈） | 57 | 220 | 665 | 1542 |
-| Dense（0.1.122 栈） | 52 | — | — | **1552** |
-| **MTP（0.1.122 栈）** | **55-62** | 246 | 709 | 1482 |
+| Dense（0.1.122 栈 + fast_opt） | 52-57 | — | — | **1579-1619** |
+| **MTP（0.1.122 栈 + fast_opt）** | **55-59** | 246 | 709 | **1609-1622** |
 
 - MTP 配置：`--speculative-config '{"num_speculative_tokens": 1, "method": "mtp"}'`，
   Mean acceptance length **1.83**
-- 单流 MTP 比 Dense 高约 9%（投机解码摊薄 GDN 串行成本）；高并发下 draft 计算
-  与验证争抢算力，比 Dense 低约 4.5%——按负载特征选择形态
+- **`XPU_SET_RECURRENT_GATED_DELTA_RULE_FWDV2_FP16_FAST_OPT=3` 官方全 FP16
+  加速开关**（kunlun_ops 0.1.122 的 fwdv2 recurrent kernel，1 负载优先 / 2 理论性能
+  优先 / 3 自动）：Dense 256 并发 +2~4%；**MTP 256 并发 1482→1609-1622（+9%，
+  追平 Dense）**。已写入启动脚本
+- **MTP + fast_opt=3 为当前最优生产组合**：单流 55-59（超 Dense），256 并发
+  1609-1622（持平 Dense）
 - 升级要点：xmlir 必须用 **20260428 版**（0409 版缺 31 参 `xfa::gated_delta_net`），
   且启动前 `export XMLIR_DYNAMO_WORKAROUND=1`（详见 [安装](installation.md)）
 - MTP 与 mamba prefix-caching 不可共存（vllm 0.15.1 限制）
