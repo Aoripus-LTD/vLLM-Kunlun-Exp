@@ -3,8 +3,11 @@
 > 在单机 8×96G 昆仑芯 P800-OAM 上，通过 vllm-kunlun 部署 **Qwen3.8-27B-INT8-W8A8-Dynamic**，
 > 原生 **262144（256K）** 上下文，**TP=8 单实例**。
 
-**部署状态（2026 年 8 月 16 日）**：加载验证与吞吐压测均已通过——TP=8 加载、
+**部署状态（2026 年 8 月 26 日更新）**：加载验证与吞吐压测均已通过——TP=8 加载、
 短文本生成、8K 长上下文召回全部正常；short 组 256 并发实测 **3201.71 output tok/s**。
+算子栈已升级至 kunlun_ops 0.1.122 + xmlir 1.0.0.1（20260428 版），官方 MTP
+spec conv kernel 修复确认，MTP 单流 **55-62 tok/s**（超越同栈 Dense），详见
+[性能](./qwen_docs/docs/performance.md)。
 
 ---
 
@@ -23,21 +26,24 @@ Qwen3.5，`model_type=qwen3_5`）。
 | 部署形态 | **TP=8 单实例**（2026 年 8 月 16 日定稿） |
 | 计算域精度 | float16（`--dtype float16`；INT8 为权重存储格式） |
 
-### 环境版本（官方验证组合，请保持固定）
+### 环境版本（2026-08-26 更新）
 
 | 组件 | 版本 | 说明 |
 |---|---|---|
 | torch | 2.5.1（xpytorch，CUDA 兼容模式） | 设备/张量/分布式代码一律使用 `cuda`，不使用 `xpu` |
-| kunlun_ops | 0.1.58 | 官方公开最新版（2026 年 2 月 27 日发布） |
+| torch_xmlir | xmlir 1.0.0.1（2026-04-22 build） | 来自 20260428/torch25 xpytorch 包；升级后需 `XMLIR_DYNAMO_WORKAROUND=1` |
+| kunlun_ops | 0.1.122 | 2026-04-28 torch25 版，修复 MTP spec conv kernel |
 | vllm | 0.15.1 | PyPI 直装 |
-| vllm-kunlun | 0.15.1.dev0（commit 4885de2） | 源码编译，`_kunlun` 扩展已构建 |
+| vllm-kunlun | 0.15.1.dev0（commit 4885de2 + MTP patches） | 源码编译，`_kunlun` 扩展已构建 |
 | transformers | 5.2.0 | 5.5.3 缺失 `max_pixels` API，不可用 |
 | triton / cocopod / xspeedgate_ops | torch25 配套版本 | 未变更 |
 
 > **版本兼容性要求**：kunlun_ops 与 vllm-kunlun 源码版本必须对应。kunlun_ops 0.1.58
 > 仅匹配 0.15.1.dev0 时代源码；0.25.1-dev（2fda97b）与 0.1.58 存在系统性接口不兼容
 > （causal_conv1d 关键字参数、11 个缺失算子、3 个 KW_MISMATCH），曾回退至官方验证组合。
-> 详见 [故障排查](./qwen_docs/docs/troubleshooting.md)。
+> kunlun_ops 0.1.122 必须搭配 xmlir 1.0.0.1 的 **20260428 版**（更早的 0409 版缺少
+> 31 参 `xfa::gated_delta_net` 符号，0.1.122 import 会失败）。详见
+> [故障排查](./qwen_docs/docs/troubleshooting.md)。
 
 ---
 
@@ -166,6 +172,22 @@ LLM(model="/home/newdata/models/Qwen3.8-27B-W8A8-INT8-Dynamic",
 | Distill-32B | 10328 |
 | Distill-14B | 18296 |
 
+### 实测结果（2026 年 8 月 26 日，kunlun_ops 0.1.122 栈）
+
+short 组（input 512 / output 512 × 256 并发）与 MTP 投机解码实测（API 层 overall，
+prompt 172 + output 256）：
+
+| 形态 | 单流 overall | 256 并发 overall |
+|---|---|---|
+| Dense（0.1.58 栈） | 57 tok/s | 1542 tok/s |
+| Dense（0.1.122 栈） | 52 tok/s | **1552 tok/s** |
+| **MTP（0.1.122 栈）** | **55-62 tok/s** | 1482 tok/s |
+
+- MTP（`num_speculative_tokens=1, method=mtp`）Mean acceptance length **1.83**，
+  单流首次反超 Dense（+9%）；高并发下 draft 计算与验证争抢算力，比 Dense 略低
+  （-4.5%），生产形态按负载特征选择
+- MTP 与 mamba prefix-caching 不可共存（vllm 0.15.1 限制）
+
 ### 带宽预算（27B W8A8，权重约 31GB，I8 24G + F16 7G）
 
 - 单卡单流 decode：31GB / 2.4TB/s ≈ 12.9ms/token（约 77 tok/s 带宽上限）
@@ -191,6 +213,9 @@ LLM(model="/home/newdata/models/Qwen3.8-27B-W8A8-INT8-Dynamic",
 | `01_env_check_v3.sh` + `xccl_bench.py` | 环境自检 + XCCL 带宽基准（实测 19.3 GB/s） |
 | `03_vllm_load.py` | 加载验证 + 短/长上下文召回 |
 | `04_throughput_bench.py` | 吞吐压测（short 512/512、long 32768/256，仅 TP=8） |
+| `start_serve_mtp.sh` | MTP 投机解码服务启动（num_speculative_tokens=1） |
+| `bench_stream.py` / `bench1.py` | 单流/流式 token 间隔基准 |
+| `start_serve_mtp_prof.sh` | MTP + torch profiler 启动（profiling 用） |
 | `rollback_4885de2_part1/3.sh` | 官方验证组合回退脚本（可重放） |
 | `fix_tf_5_2_0.sh` | transformers 5.5.3 → 5.2.0 修复 |
 | `ssh_run.py` | paramiko SSH 执行/上传（连接参数全部走环境变量） |
@@ -211,6 +236,7 @@ LLM(model="/home/newdata/models/Qwen3.8-27B-W8A8-INT8-Dynamic",
 | 9 | kunlun_ops 0.1.58 与 2fda97b 源码接口不兼容 | 官方无新版，整体回退 4885de2 官方验证组合 |
 | 10 | transformers 5.5.3 缺失 `max_pixels` | 降级 5.2.0（`qwen2_vl.py:918` AttributeError） |
 | 11 | 采样器 exponential_ CPU fallback | decode 卡死根因，已改为设备端采样（commit b311b51） |
+| 12 | kunlun_ops 0.1.122 import undefined symbol | 需配 xmlir 1.0.0.1 20260428 版 + `XMLIR_DYNAMO_WORKAROUND=1`（详见 [安装](./qwen_docs/docs/installation.md)） |
 
 ---
 

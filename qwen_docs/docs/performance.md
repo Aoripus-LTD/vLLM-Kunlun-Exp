@@ -53,6 +53,25 @@
 - long 组以 prefill 为主导：32K 上下文下 chunked prefill 占用主要算力，生成阶段
   仅约 4s；长上下文场景应关注 TTFT 而非生成吞吐
 
+## 实测结果（2026-08-26，kunlun_ops 0.1.122 栈 + MTP）
+
+算子栈升级（kunlun_ops 0.1.122 + xmlir 1.0.0.1 20260428 版）后，API 层 overall
+吞吐（prompt 172 + output 256）：
+
+| 形态 | 单流 overall | 8 并发 | 32 并发 | 256 并发 |
+|---|---|---|---|---|
+| Dense（0.1.58 栈） | 57 | 220 | 665 | 1542 |
+| Dense（0.1.122 栈） | 52 | — | — | **1552** |
+| **MTP（0.1.122 栈）** | **55-62** | 246 | 709 | 1482 |
+
+- MTP 配置：`--speculative-config '{"num_speculative_tokens": 1, "method": "mtp"}'`，
+  Mean acceptance length **1.83**
+- 单流 MTP 比 Dense 高约 9%（投机解码摊薄 GDN 串行成本）；高并发下 draft 计算
+  与验证争抢算力，比 Dense 低约 4.5%——按负载特征选择形态
+- 升级要点：xmlir 必须用 **20260428 版**（0409 版缺 31 参 `xfa::gated_delta_net`），
+  且启动前 `export XMLIR_DYNAMO_WORKAROUND=1`（详见 [安装](installation.md)）
+- MTP 与 mamba prefix-caching 不可共存（vllm 0.15.1 限制）
+
 ## 带宽预算（27B W8A8，权重约 31GB = I8 24G + F16 7G）
 
 - **单卡单流 decode**：31GB / 2.4TB/s ≈ 12.9ms/token，约 77 tok/s 带宽上限

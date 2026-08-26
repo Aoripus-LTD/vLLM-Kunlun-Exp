@@ -18,8 +18,14 @@
 
     - **部署形态**：TP=8 单实例（不再考虑单卡多实例）
     - **上下文**：原生 262144，不启用 YaRN 1M 扩展（业务需求 ≤256K）
-    - **环境组合**：torch 2.5.1 + kunlun_ops 0.1.58 + vllm 0.15.1 + vllm-kunlun 4885de2 + transformers 5.2.0（官方验证组合）
+    - **环境组合**：torch 2.5.1 + kunlun_ops 0.1.122 + xmlir 1.0.0.1（20260428 版）+ vllm 0.15.1 + vllm-kunlun 4885de2 + transformers 5.2.0
     - **压测**：04 已通过（short 3201.71 output tok/s / long 84.02 output tok/s）
+
+=== "2026-08-26：MTP 投机解码上线"
+
+    - 算子栈升级 kunlun_ops 0.1.122 + xmlir 1.0.0.1（20260428 版），官方 MTP spec conv kernel 修复确认
+    - MTP 单流 **55-62 tok/s**（超越 Dense），Mean acceptance length 1.83
+    - 启动需 `XMLIR_DYNAMO_WORKAROUND=1`（详见 [启动参数](launch.md)）
 
 ## 文档导航
 
@@ -27,7 +33,7 @@
 |---|---|
 | [项目概览](overview.md) | 项目定位、硬件/软件规格、版本兼容性要求 |
 | [快速开始](quickstart.md) | 容器创建、环境安装、启动验证全流程 |
-| [安装](installation.md) | 逐步安装详解（官方验证组合） |
+| [安装](installation.md) | 逐步安装详解（0.1.122 栈 + xmlir 0428） |
 | [模型与适配](model.md) | Qwen3.8 架构、W8A8 量化格式、config 权威字段 |
 | [启动参数](launch.md) | 权威参数说明（float16 / 262144 / PR 408） |
 | [性能与压测](performance.md) | XCCL 实测、带宽预算、官方基准、压测方法 |

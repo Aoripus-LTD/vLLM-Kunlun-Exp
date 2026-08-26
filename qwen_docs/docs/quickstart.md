@@ -25,11 +25,14 @@ docker run -itd --name qwen38-p800 \
     - 容器内 python 位于 `/opt/vllm_kunlun/bin/python`（venv，无 pip），包安装统一使用
       `uv pip install --python /opt/vllm_kunlun/bin/python --index-url https://pypi.tuna.tsinghua.edu.cn/simple`
 
-## 2. 安装环境（官方验证组合）
+## 2. 安装环境（0.1.122 栈）
 
 ```bash
-# 驱动插件/算子栈（kunlun_ops 0.1.58 + triton + xspeedgate_ops + cocopod）
+# 驱动插件/算子栈（kunlun_ops 0.1.122 + triton + xspeedgate_ops + cocopod）
 # cocopod 安装需 UV_SKIP_WHEEL_FILENAME_CHECK=1（wheel 文件名与内部版本号不一致）
+
+# torch_xmlir：从 20260428/torch25 的 xpytorch .run 解压出 xmlir whl 后安装
+uv pip install xmlir-1.0.0.1-cp310-cp310-linux_x86_64.whl --no-deps --force-reinstall
 
 # vLLM（PyPI 直装）
 uv pip install vllm==0.15.1 --force-reinstall --no-deps
@@ -45,6 +48,9 @@ uv pip install transformers==5.2.0 --no-deps --force-reinstall
 python vllm_kunlun/patches/patch_torch251.py
 cp vllm_kunlun/patches/eval_frame.py /opt/vllm_kunlun/lib/python3.10/site-packages/torch/_dynamo/eval_frame.py
 cp vllm_kunlun/quantization/__init__.py /opt/vllm_kunlun/lib/python3.10/site-packages/vllm/model_executor/layers/quantization/__init__.py
+
+# 启动前必加（xmlir 1.0.0.1 的 torch.compile 兼容开关）
+export XMLIR_DYNAMO_WORKAROUND=1
 ```
 
 !!! warning "editable 安装形态说明"

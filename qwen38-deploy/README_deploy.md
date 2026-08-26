@@ -11,18 +11,29 @@
 
 ---
 
-## 环境组合（官方验证组合）
+## 环境组合（2026-08-26 更新）
 
 | 组件 | 版本 | 说明 |
 |---|---|---|
 | torch | 2.5.1 | 昆仑芯 xpytorch，CUDA 兼容模式（设备相关代码使用 cuda，不使用 xpu） |
-| kunlun_ops | 0.1.58 | 驱动插件/算子栈（官方公开最新版） |
+| torch_xmlir | xmlir 1.0.0.1（2026-04-22 build） | 来自 20260428/torch25 xpytorch `.run`；**0409 版不兼容 0.1.122** |
+| kunlun_ops | 0.1.122 | 2026-04-28 torch25 版，MTP spec conv kernel 已修复 |
 | vllm | 0.15.1 | PyPI `--force-reinstall --no-deps` |
-| vllm-kunlun | 0.15.1.dev0（4885de2） | 仓库根 setup.py build+install |
+| vllm-kunlun | 0.15.1.dev0（4885de2 + MTP patches） | 仓库根 setup.py build+install |
 | transformers | 5.2.0 | 5.5.3 缺失 max_pixels API（需降级） |
-| triton / xspeedgate_ops / cocopod | 3.0.0 / +torch25 | cocopod 需 `UV_SKIP_WHEEL_FILENAME_CHECK=1` |
+| triton / xspeedgate_ops / cocopod | 3.0.0 / 1.5.0+torch25 / +torch25 | cocopod 需 `UV_SKIP_WHEEL_FILENAME_CHECK=1` |
 
 版本兼容性要求：**驱动插件版本与 vLLM 版本必须对应**，修改任一组件前先核对。
+升级要点：
+
+1. kunlun_ops 0.1.122 必须配 xmlir 1.0.0.1 的 **20260428 版**（更早的 0409 版
+   缺 31 参 `xfa::gated_delta_net`，0.1.122 import 报 undefined symbol）
+2. 0.1.122 的 Python 扩展 `xpu_kunlun_ops` / `xpu_flash_ops` 在 whl 根目录
+   （site-packages 顶层），安装时别漏
+3. xmlir 升级后启动必须 `export XMLIR_DYNAMO_WORKAROUND=1`（torch.compile
+   在 `make_tensors_stateful` 上 Unsupported；已写入 start_serve.sh /
+   start_serve_mtp.sh）
+4. 旧组合（0.1.58 + 0409 xmlir）备份齐全可回退
 
 ## 模型与量化
 
@@ -53,7 +64,8 @@
 
 环境变量：`source .../vLLM-Kunlun-0.25.1-dev/setup_env.sh`（XPU_VISIBLE_DEVICES=0-7、
 XFT_USE_FAST_SWIGLU=1、XMLIR_CUDNN_ENABLED=1、XPU_USE_DEFAULT_CTX=1、
-XMLIR_FORCE_USE_XPU_GRAPH=1、VLLM_HOST_IP=$(hostname -i)、USE_ORI_ROPE=1）
+XMLIR_FORCE_USE_XPU_GRAPH=1、VLLM_HOST_IP=$(hostname -i)、USE_ORI_ROPE=1、
+**XMLIR_DYNAMO_WORKAROUND=1**——xmlir 1.0.0.1 升级后必需，已写入启动脚本）
 
 ## 实测里程碑（2026-08-16）
 
@@ -70,6 +82,24 @@ XMLIR_FORCE_USE_XPU_GRAPH=1、VLLM_HOST_IP=$(hostname -i)、USE_ORI_ROPE=1）
   generators 分支改用 uniform_ + (-log) 统计等价的指数噪声。修改位于
   vllm_kunlun/v1/sample/ops/topk_topp_sampler.py（容器双份同步：site-packages +
   仓库根）
+
+## 实测里程碑（2026-08-26，0.1.122 栈 + MTP）
+
+- **算子栈升级**：kunlun_ops 0.1.122 + xmlir 1.0.0.1（20260428 版），官方 MTP
+  spec conv kernel 修复确认（0 崩溃），单流 Mean acceptance length 1.83
+- **API 层 overall 吞吐**（prompt 172 + output 256）：
+
+  | 形态 | 单流 | 8 并发 | 32 并发 | 256 并发 |
+  |---|---|---|---|---|
+  | Dense（0.1.58 栈） | 57 | 220 | 665 | 1542 |
+  | Dense（0.1.122 栈） | 52 | — | — | **1552** |
+  | **MTP（0.1.122 栈）** | **55-62** | 246 | 709 | 1482 |
+
+- **MTP 启动**：`start_serve_mtp.sh`（`--speculative-config '{"num_speculative_tokens": 1, "method": "mtp"}'`）；
+  causal_conv1d spec 分支已切换为官方单次 kernel（commit e173c5e）
+- **剩余优化点**：MTP iteration 28-38ms（enforce-eager 下 layer0 计时：conv
+  0.45ms / recurrent 0.23ms / 输入投影 1.4ms），单流仍有约 2x 优化空间
+- **生产形态选择**：高并发负载用 Dense（新栈 1552 tok/s），单流敏感场景用 MTP
 
 ## 部署操作
 

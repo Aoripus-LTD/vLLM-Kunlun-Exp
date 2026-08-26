@@ -67,7 +67,24 @@ XMLIR_FORCE_USE_XPU_GRAPH=1          # 强制 XPU Graph
 VLLM_HOST_IP=$(hostname -i)          # 分布式通信 IP
 VLLM_USE_V1=1                        # V1 引擎
 USE_ORI_ROPE=1                       # Qwen3 融合大算子开关
+XMLIR_DYNAMO_WORKAROUND=1            # xmlir 1.0.0.1 必需（torch.compile 兼容）
 ```
+
+> `XMLIR_DYNAMO_WORKAROUND=1` 为 xmlir 1.0.0.1 升级后新增：其 `torch_xmlir/nn/linear.py`
+> 的 hydra linear 路径使用 `make_tensors_stateful` contextmanager，torch.compile 会报
+> Unsupported；开启该开关后 linear 走 `torch.ops._dynamo_workaround.linear` 才可编译。
+
+## MTP 投机解码启动
+
+```bash
+vllm serve /home/newdata/models/Qwen3.8-27B-W8A8-INT8-Dynamic \
+  --speculative-config '{"num_speculative_tokens": 1, "method": "mtp"}' \
+  ...（其余参数同 Dense）
+```
+
+- 需要 kunlun_ops **0.1.122**（0.1.58 的 spec conv kernel 会 illegal memory access）
+- MTP 与 mamba prefix-caching 不可共存（vllm 0.15.1 限制）
+- 实测见 [性能](performance.md)
 
 ## 平台适配注意事项
 

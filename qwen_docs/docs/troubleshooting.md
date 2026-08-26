@@ -14,6 +14,7 @@
 | 9 | **kunlun_ops 0.1.58 与 2fda97b 源码不兼容** | **官方无新版，整体回退 4885de2 官方验证组合** |
 | 10 | transformers 5.5.3 缺失 `max_pixels` | 降级 5.2.0 |
 | 11 | **采样器 exponential_ CPU fallback** | **decode 停滞根因，改为 kunlun_ops 设备端采样**（另附：KV 预算 OOM + random 参数注意事项） |
+| 12 | **kunlun_ops 0.1.122 import undefined symbol** | **需配 xmlir 1.0.0.1 20260428 版 + `XMLIR_DYNAMO_WORKAROUND=1`** |
 
 ## 环境与平台（2026-08-15）
 
@@ -161,6 +162,27 @@ short 512/512 @256 并发 output 吞吐由 32 提升至 **3201.71 tok/s（约 72
 - config 为包（`vllm/config/cache.py` 等）
 - `LLM.__init__` 为薄封装（显式参数少，其余参数经 **kwargs 透传 EngineArgs）——
   03 的 `enable_chunked_prefill` 等参数经透传可用（已实测验证）
+
+## kunlun_ops 0.1.122 升级排查（2026-08-26）
+
+升级 0.1.122 时按顺序踩了三个坑：
+
+1. **`xbfloat16` C1 符号缺失**：0.1.122 的 `libapiinfer.so` 需要
+   `_ZN9xbfloat16C1Ef`（complete object constructor），旧 torch_xmlir 只有 C2 版本。
+   系统扫描全部 .so 后确认旧库仅缺这一个 xbfloat16 符号（ContextStackGuard 等其他
+   依赖均可解析）
+2. **31 参 `xfa::gated_delta_net` 缺失**：补齐 xbfloat16 后，`libxops_blocks.so`
+   报缺 `baidu::xpu::xfa::gated_delta_net` 的 31 参版本——xmlir 1.0.0.1 的
+   20260409 版只有 30 参版。**必须使用 20260428/torch25 的 xpytorch 包**（其
+   xmlir 1.0.0.1 为 2026-04-22 build，31 参符号与 xbfloat16 C1 都在，无需任何 shim）
+3. **`make_tensors_stateful` Unsupported**：新 xmlir 的 `torch_xmlir/nn/linear.py`
+   在 hydra linear 路径使用 contextmanager，torch.compile 报
+   `'inline in skipfiles: StatefulConfig.make_tensors_stateful'`。官方开关
+   `XMLIR_DYNAMO_WORKAROUND=1` 让 linear 走 `torch.ops._dynamo_workaround.linear`
+   后正常编译
+
+另注意：0.1.122 的 Python 扩展 `xpu_kunlun_ops` / `xpu_flash_ops` 位于 **whl
+根目录**（site-packages 顶层），不在 `kunlun_ops/` 包目录里，安装时容易漏。
 
 ## 操作经验
 

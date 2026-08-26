@@ -24,26 +24,29 @@ W8A8 INT8 动态量化导出。
 | TDP | 400W |
 | 制程/架构 | 7nm / XPU-P（第三代） |
 
-## 软件版本（官方验证组合，请保持固定）
+## 软件版本（2026-08-26 更新）
 
 | 组件 | 版本 | 说明 |
 |---|---|---|
 | OS | Ubuntu（docker 容器内） | 镜像 `docker.int.aoripus.com/vllm-kunlun-exp:base` |
 | python | 3.10.19（`/opt/vllm_kunlun/bin/python`） | venv，无 pip，包安装统一使用 uv |
 | torch | 2.5.1（xpytorch，CUDA 兼容模式） | `torch.xpu` 不可用，设备相关代码统一使用 `cuda` |
-| kunlun_ops | 0.1.58 | 官方公开最新版（2026-02-27） |
+| torch_xmlir | xmlir 1.0.0.1（2026-04-22 build） | 来自 20260428/torch25 xpytorch 包 |
+| kunlun_ops | 0.1.122 | 2026-04-28 torch25 版，修复 MTP spec conv kernel |
 | triton | 3.0.0+b2cde523 | torch25 配套 |
-| xspeedgate_ops | 0.0.0+torch25 | 驱动插件 |
+| xspeedgate_ops | 1.5.0+torch25 | 驱动插件 |
 | cocopod | 0.0.0+torch25 | 安装需 `UV_SKIP_WHEEL_FILENAME_CHECK=1` |
 | vllm | 0.15.1 | PyPI 直装（`--force-reinstall --no-deps`） |
-| vllm-kunlun | 0.15.1.dev0（commit 4885de2） | 源码编译，`_kunlun` 已构建 |
+| vllm-kunlun | 0.15.1.dev0（commit 4885de2 + MTP patches） | 源码编译，`_kunlun` 已构建 |
 | transformers | 5.2.0 | 5.5.3 缺失 `max_pixels` API，不可用 |
 
 !!! warning "版本兼容性要求"
     kunlun_ops 与 vllm-kunlun 源码版本必须对应。kunlun_ops 0.1.58 仅匹配
     0.15.1.dev0 时代源码；0.25.1-dev（2fda97b）与 0.1.58 存在系统性接口不兼容
-    （causal_conv1d 关键字参数、11 个缺失算子、3 个 KW_MISMATCH），已整体回退至
-    官方验证组合。详见 [故障排查](troubleshooting.md)。
+    （causal_conv1d 关键字参数、11 个缺失算子、3 个 KW_MISMATCH），曾整体回退至
+    官方验证组合。**kunlun_ops 0.1.122 必须配 xmlir 1.0.0.1 的 20260428 版**，
+    且启动需 `XMLIR_DYNAMO_WORKAROUND=1`。详见 [安装](installation.md) 与
+    [故障排查](troubleshooting.md)。
 
 ## 关键认知
 
