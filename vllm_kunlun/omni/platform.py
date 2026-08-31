@@ -106,15 +106,12 @@ class KunlunOmniPlatform(OmniPlatform, KunlunPlatform):
 
     @classmethod
     def record_device_event(cls):
-        try:
-            event = torch.cuda.Event()
-            event.record()
-            return event
-        except Exception:
-            logger.warning(
-                "Failed to record Kunlun device event for cross-stream sync"
-            )
-            return None
+        # The base OmniPlatform documents that platforms without a native
+        # cross-stream event implementation (ROCm/XPU/MUSA) fall through to a
+        # safe no-op.  Kunlun's CUDA-emulated streams/events do not reliably
+        # support cross-stream wait_event; returning a real event here made
+        # the async D2H/SHM output packer crash the diffusion worker.
+        return None
 
     @classmethod
     def get_free_memory(cls, device: torch.device | None = None) -> int:
