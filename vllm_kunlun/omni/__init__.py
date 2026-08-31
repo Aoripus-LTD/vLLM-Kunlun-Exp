@@ -90,6 +90,13 @@ def apply_kunlun_vllm_omni_patches() -> None:
     except Exception:
         # DP2 patches are an optimisation; platform resolution must not fail.
         pass
+    try:
+        from vllm_kunlun.omni.cudagraph import apply_kunlun_cudagraph_patches
+
+        apply_kunlun_cudagraph_patches()
+    except Exception:
+        # CUDA Graph patches are an optimisation; platform resolution must not fail.
+        pass
     _OMNI_PATCHED = True
 
 

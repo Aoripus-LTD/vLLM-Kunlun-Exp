@@ -87,6 +87,15 @@ class KunlunOmniPlatform(OmniPlatform, KunlunPlatform):
         return False
 
     @classmethod
+    def use_custom_op_collectives(cls) -> bool:
+        # vLLM's GroupCoordinator dispatches ``all_reduce`` through
+        # ``torch.ops.vllm.all_reduce`` when this returns True.  Both branches
+        # end in ``KunlunCommunicator.all_reduce`` -> ``dist.all_reduce`` on
+        # Kunlun, so this only changes the Python indirection; it is kept
+        # explicit so the CUDA Graph collective experiments can toggle it.
+        return True
+
+    @classmethod
     def get_torch_device(cls, local_rank: int | None = None) -> torch.device:
         if local_rank is None:
             return torch.device("cuda")
