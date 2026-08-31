@@ -70,5 +70,8 @@ if __name__ == "__main__":
                 "kunlun_reasoning_parser = vllm_kunlun:register_reasoning_parser",
                 "kunlun_tool_parser = vllm_kunlun:register_tool_parser",
             ],
+            "vllm_omni.platform_plugins": [
+                "kunlun_omni = vllm_kunlun.omni:register_omni_platform",
+            ],
         },
     )
