@@ -83,6 +83,13 @@ def apply_kunlun_vllm_omni_patches() -> None:
         return
     _patch_diffusion_output_shm()
     _patch_h3_vae_cpu_load()
+    try:
+        from vllm_kunlun.omni.dp2 import apply_kunlun_dp2_patches
+
+        apply_kunlun_dp2_patches()
+    except Exception:
+        # DP2 patches are an optimisation; platform resolution must not fail.
+        pass
     _OMNI_PATCHED = True
 
 
