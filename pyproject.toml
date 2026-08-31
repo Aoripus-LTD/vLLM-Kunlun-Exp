@@ -26,6 +26,9 @@ kunlun_model = "vllm_kunlun:register_model"
 kunlun_reasoning_parser = "vllm_kunlun:register_reasoning_parser"
 kunlun_tool_parser = "vllm_kunlun:register_tool_parser"
 
+[project.entry-points."vllm_omni.platform_plugins"]
+kunlun_omni = "vllm_kunlun.omni:register_omni_platform"
+
 [tool.setuptools.packages.find]
 include = ["vllm_kunlun*"]
 
