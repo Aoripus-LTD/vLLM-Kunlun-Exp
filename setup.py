@@ -42,6 +42,11 @@ class CustomBuildExt(BuildExtension):
             file_name = os.path.basename(ext_path)
             target_path = os.path.join("vllm_kunlun", file_name)
 
+            if os.path.abspath(ext_path) == os.path.abspath(target_path):
+                # In-place build: setuptools already placed the extension in
+                # the source tree; removing it would break the build.
+                print(f"[BuildExt] In-place build, extension already at {target_path}")
+                continue
             if os.path.exists(target_path):
                 os.remove(target_path)
             shutil.copyfile(ext_path, target_path)
@@ -69,6 +74,9 @@ if __name__ == "__main__":
                 "kunlun_model = vllm_kunlun:register_model",
                 "kunlun_reasoning_parser = vllm_kunlun:register_reasoning_parser",
                 "kunlun_tool_parser = vllm_kunlun:register_tool_parser",
+            ],
+            "vllm_omni.platform_plugins": [
+                "kunlun_omni = vllm_kunlun.omni:register_omni_platform",
             ],
         },
     )
