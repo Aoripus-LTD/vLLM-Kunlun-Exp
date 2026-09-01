@@ -97,6 +97,13 @@ def apply_kunlun_vllm_omni_patches() -> None:
     except Exception:
         # CUDA Graph patches are an optimisation; platform resolution must not fail.
         pass
+    try:
+        from vllm_kunlun.omni.lora_h3 import apply_kunlun_h3_lora_patches
+
+        apply_kunlun_h3_lora_patches()
+    except Exception:
+        # MiniMax H3 Turbo LoRA wiring is optional; platform resolution must not fail.
+        pass
     _OMNI_PATCHED = True
 
 
