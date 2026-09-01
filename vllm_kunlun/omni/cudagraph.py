@@ -38,6 +38,7 @@ from typing import Any
 import torch
 
 _KUNLUN_DIFFUSION_CUDAGRAPH_PATCHED = False
+_MINIMAX_H3_ATTENTION_PATCH_PENDING = False
 _MAX_UNIQUE_TIMESTEPS = 4
 
 _logger = logging.getLogger("vllm_kunlun.omni.cudagraph")
@@ -83,15 +84,28 @@ def _static_attn_mask(
     return mask
 
 
-def _patch_minimax_h3_attention_static_meta() -> None:
-    """Make ``_run_packed_attention`` capture-safe (no .item()/arange per step)."""
+def _patch_minimax_h3_attention_static_meta() -> bool:
+    """Make ``_run_packed_attention`` capture-safe (no .item()/arange per step).
+
+    Returns ``True`` when the patch is in place (either freshly applied or
+    already present from an earlier call).  During platform registration the
+    ``minimax_h3_transformer`` module may not be importable yet; in that case
+    the patch is marked pending and is retried lazily on the first denoise-loop
+    call, by which point the import chain has completed.
+    """
+    global _MINIMAX_H3_ATTENTION_PATCH_PENDING
     try:
         from vllm_omni.diffusion.models.minimax_h3 import minimax_h3_transformer as _tmod
     except Exception:
-        return
+        _MINIMAX_H3_ATTENTION_PATCH_PENDING = True
+        return False
     attn_cls = getattr(_tmod, "MiniMaxH3Attention", None)
-    if attn_cls is None or getattr(attn_cls, "_kunlun_cudagraph_meta_patched", False):
-        return
+    if attn_cls is None:
+        _MINIMAX_H3_ATTENTION_PATCH_PENDING = True
+        return False
+    if getattr(attn_cls, "_kunlun_cudagraph_meta_patched", False):
+        _MINIMAX_H3_ATTENTION_PATCH_PENDING = False
+        return True
 
     from vllm_omni.diffusion.attention.backends.abstract import AttentionMetadata
 
@@ -126,7 +140,40 @@ def _patch_minimax_h3_attention_static_meta() -> None:
 
     attn_cls._run_packed_attention = _run_packed_attention
     attn_cls._kunlun_cudagraph_meta_patched = True
+    _MINIMAX_H3_ATTENTION_PATCH_PENDING = False
     _logger.info("CUDA Graph: MiniMaxH3Attention._run_packed_attention made capture-safe")
+    return True
+
+
+def _register_minimax_h3_attention_import_hook() -> None:
+    """Patch ``minimax_h3_transformer`` as soon as it becomes importable.
+
+    During vLLM-Omni platform registration the transformer module cannot be
+    imported yet: its import chain hits ``vllm_omni.diffusion.envs`` while that
+    module is still partially initialised (``PACKAGES_CHECKER`` does not exist
+    yet).  Registering with the Kunlun post-import dispatcher means the patch
+    is applied synchronously the first time any code imports the transformer,
+    which is before the first packed attention can run.
+    """
+    target = "vllm_omni.diffusion.models.minimax_h3.minimax_h3_transformer"
+    try:
+        from vllm_kunlun.registration.import_hooks import register_hook
+    except Exception:
+        return
+
+    def _is_applied(module: Any) -> bool:
+        attn_cls = getattr(module, "MiniMaxH3Attention", None)
+        return bool(getattr(attn_cls, "_kunlun_cudagraph_meta_patched", False))
+
+    def _apply(module: Any) -> None:
+        del module  # the patcher resolves the live module itself
+        _patch_minimax_h3_attention_static_meta()
+
+    try:
+        register_hook(target, _is_applied, _apply)
+    except ValueError:
+        # Already registered by an earlier apply call in this process.
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -328,6 +375,14 @@ def _patch_denoise_loop_graph() -> None:
         if audio_anchor is not None:
             audio_rows[~audio_update] = audio_anchor
 
+        # Lazy fallback: if the attention patch could not be applied during
+        # platform registration (the transformer module was not importable
+        # yet), the import chain is complete by the first denoise-loop call.
+        # Patch before the first packed attention runs so both eager and
+        # graph priming populate the static limits/mask caches.
+        if _MINIMAX_H3_ATTENTION_PATCH_PENDING:
+            _patch_minimax_h3_attention_static_meta()
+
         graph_runner = _MiniMaxH3CudaGraphRunner(model) if _enabled() else None
         step_log = os.environ.get("KUNLUN_DIFFUSION_CUDAGRAPH_STEP_LOG") == "1"
 
@@ -410,7 +465,14 @@ def apply_kunlun_cudagraph_patches() -> None:
     global _KUNLUN_DIFFUSION_CUDAGRAPH_PATCHED
     if _KUNLUN_DIFFUSION_CUDAGRAPH_PATCHED:
         return
-    _patch_minimax_h3_attention_static_meta()
+    # Apply the denoise patches first (they are importable during platform
+    # registration) and register the attention patch for the first successful
+    # ``minimax_h3_transformer`` import.  That import fails during platform
+    # registration with a circular-import error, so the direct attempt below
+    # only succeeds in processes where the module is already loaded; the
+    # post-import hook (plus the lazy denoise-loop fallback) covers the rest.
     _patch_denoise_branch_static_buffers()
     _patch_denoise_loop_graph()
+    _register_minimax_h3_attention_import_hook()
+    _patch_minimax_h3_attention_static_meta()
     _KUNLUN_DIFFUSION_CUDAGRAPH_PATCHED = True
